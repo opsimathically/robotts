@@ -1305,6 +1305,7 @@ function build_public_image_search_result(native_result, source_context, referen
 		score: native_result.score,
 		location: native_result.location,
 		size: native_result.size,
+		overlap_ratio: typeof native_result.overlap_ratio === 'number' ? native_result.overlap_ratio : null,
 		global_location: null,
 		source_type: source_context.source_type,
 		reference_type: reference_context.reference_type,
@@ -1312,7 +1313,7 @@ function build_public_image_search_result(native_result, source_context, referen
 		target: source_context.target
 	};
 
-	if (public_result.found && public_result.location && source_context.offset_x !== null && source_context.offset_y !== null)
+	if (public_result.location && source_context.offset_x !== null && source_context.offset_y !== null)
 	{
 		public_result.global_location = {
 			x: source_context.offset_x + public_result.location.x,
@@ -1355,22 +1356,306 @@ function find_all_images_in_source(params)
 	});
 }
 
+function get_validated_fuzzy_number(params)
+{
+	var value = params.value;
+	var label = params.label;
+	var minimum = params.minimum;
+	var maximum = params.maximum;
+
+	if (typeof value === 'undefined')
+	{
+		return params.default_value;
+	}
+
+	if (typeof value !== 'number' || !Number.isFinite(value) || value < minimum || value > maximum)
+	{
+		throw new Error(label + ' must be a finite number between ' + minimum + ' and ' + maximum + '.');
+	}
+
+	return value;
+}
+
+function get_validated_sample_step(value)
+{
+	if (typeof value === 'undefined')
+	{
+		return 0;
+	}
+
+	if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || Math.floor(value) !== value)
+	{
+		throw new Error('sample_step must be a non-negative integer.');
+	}
+
+	return value;
+}
+
 function find_fuzzy_image_in_source(params)
 {
 	var action_params = params || {};
 	var source_context = capture_image_search_source(action_params);
 	var reference_context = normalize_image_reference(action_params.reference);
+	var threshold = get_validated_fuzzy_number({
+		value: action_params.threshold,
+		label: 'threshold',
+		minimum: 0,
+		maximum: 1,
+		default_value: 0.85
+	});
+	var tolerance = get_validated_fuzzy_number({
+		value: action_params.tolerance,
+		label: 'tolerance',
+		minimum: 0,
+		maximum: 1,
+		default_value: 0.15
+	});
+	var minimum_overlap_ratio = get_validated_fuzzy_number({
+		value: action_params.minimum_overlap_ratio,
+		label: 'minimum_overlap_ratio',
+		minimum: 0,
+		maximum: 1,
+		default_value: 0.6
+	});
+	var sample_step = get_validated_sample_step(action_params.sample_step);
 	var native_result = robotjs.findFuzzyBitmap(
 		source_context.bitmap,
 		reference_context.bitmap,
-		typeof action_params.threshold !== 'undefined' ? action_params.threshold : 0.85,
-		typeof action_params.tolerance !== 'undefined' ? action_params.tolerance : 0.15,
+		threshold,
+		tolerance,
 		action_params.allow_partial_match === true,
-		typeof action_params.minimum_overlap_ratio !== 'undefined' ? action_params.minimum_overlap_ratio : 0.6,
-		typeof action_params.sample_step !== 'undefined' ? action_params.sample_step : 0
+		minimum_overlap_ratio,
+		sample_step
 	);
 
 	return build_public_image_search_result(native_result, source_context, reference_context);
+}
+
+function get_image_match_anchor(anchor)
+{
+	if (typeof anchor === 'undefined' || anchor === null)
+	{
+		return 'center';
+	}
+
+	if (anchor !== 'center' && anchor !== 'top_left')
+	{
+		throw new Error('Invalid image match anchor specified.');
+	}
+
+	return anchor;
+}
+
+function get_image_move_offset(value, label)
+{
+	if (typeof value === 'undefined')
+	{
+		return 0;
+	}
+
+	if (typeof value !== 'number' || !Number.isFinite(value))
+	{
+		throw new Error(label + ' must be a finite number.');
+	}
+
+	return value;
+}
+
+function assert_coordinate_bearing_image_source(params)
+{
+	var source = params.source;
+
+	if (source && source.type === 'bitmap')
+	{
+		throw new Error('Image move operations require a coordinate-bearing image search source. Bitmap sources are not supported.');
+	}
+}
+
+function get_image_match_destination_point(params)
+{
+	var match = params.match;
+	var match_anchor = get_image_match_anchor(params.match_anchor);
+	var offset_x = get_image_move_offset(params.offset_x, 'offset_x');
+	var offset_y = get_image_move_offset(params.offset_y, 'offset_y');
+	var destination_x;
+	var destination_y;
+
+	if (!match || !match.global_location || !match.size)
+	{
+		throw new Error('The accepted image match does not provide usable global coordinates.');
+	}
+
+	destination_x = match.global_location.x;
+	destination_y = match.global_location.y;
+
+	if (match_anchor === 'center')
+	{
+		destination_x += Math.round((match.size.width - 1) / 2);
+		destination_y += Math.round((match.size.height - 1) / 2);
+	}
+
+	return {
+		x: Math.round(destination_x + offset_x),
+		y: Math.round(destination_y + offset_y),
+		target: match.target || null
+	};
+}
+
+function build_image_mouse_move_result(params)
+{
+	var public_result = {
+		found: !!(params.match && params.match.found),
+		moved: params.moved === true,
+		match: params.match,
+		destination: params.destination ? {
+			x: params.destination.x,
+			y: params.destination.y
+		} : null
+	};
+
+	if (typeof params.effective_seed !== 'undefined')
+	{
+		public_result.effective_seed = params.effective_seed;
+	}
+
+	return public_result;
+}
+
+function move_mouse_to_image_match(params)
+{
+	var match = params.match;
+	var destination_point;
+	var path_result;
+
+	if (!match || match.found !== true)
+	{
+		return build_image_mouse_move_result({
+			match: match,
+			moved: false,
+			destination: null
+		});
+	}
+
+	destination_point = get_image_match_destination_point({
+		match: match,
+		match_anchor: params.match_anchor,
+		offset_x: params.offset_x,
+		offset_y: params.offset_y
+	});
+
+	if (params.path === true)
+	{
+		path_result = move_mouse_path({
+			destination_point: destination_point,
+			style: params.style,
+			duration_ms: params.duration_ms,
+			steps: params.steps,
+			random_seed: params.random_seed,
+			include_effective_seed: params.include_effective_seed,
+			randomization_amount: params.randomization_amount,
+			speed_profile: params.speed_profile,
+			speed_variation_amount: params.speed_variation_amount,
+			min_step_delay_ms: params.min_step_delay_ms,
+			max_step_delay_ms: params.max_step_delay_ms,
+			wave_amplitude: params.wave_amplitude,
+			wave_frequency: params.wave_frequency,
+			humanization_amount: params.humanization_amount
+		});
+
+		return build_image_mouse_move_result({
+			match: match,
+			moved: true,
+			destination: {
+				x: path_result.x,
+				y: path_result.y
+			},
+			effective_seed: path_result.effective_seed
+		});
+	}
+
+	robotjs.moveMouse(destination_point.x, destination_point.y);
+
+	return build_image_mouse_move_result({
+		match: match,
+		moved: true,
+		destination: destination_point
+	});
+}
+
+function run_image_mouse_move_action(params)
+{
+	var action_params = params.action_params || {};
+	var search_result;
+
+	if (params.require_coordinate_source !== false)
+	{
+		assert_coordinate_bearing_image_source(action_params);
+	}
+
+	search_result = params.find_match(action_params);
+
+	return move_mouse_to_image_match({
+		match: search_result,
+		path: params.path === true,
+		match_anchor: action_params.match_anchor,
+		offset_x: action_params.offset_x,
+		offset_y: action_params.offset_y,
+		style: action_params.style,
+		duration_ms: action_params.duration_ms,
+		steps: action_params.steps,
+		random_seed: action_params.random_seed,
+		include_effective_seed: action_params.include_effective_seed,
+		randomization_amount: action_params.randomization_amount,
+		speed_profile: action_params.speed_profile,
+		speed_variation_amount: action_params.speed_variation_amount,
+		min_step_delay_ms: action_params.min_step_delay_ms,
+		max_step_delay_ms: action_params.max_step_delay_ms,
+		wave_amplitude: action_params.wave_amplitude,
+		wave_frequency: action_params.wave_frequency,
+		humanization_amount: action_params.humanization_amount
+	});
+}
+
+function build_locked_window_image_source(locked_window, action_params)
+{
+	return {
+		type: 'locked_window',
+		locked_window: locked_window,
+		x: action_params.x,
+		y: action_params.y,
+		width: action_params.width,
+		height: action_params.height,
+		require_active: action_params.require_active === true
+	};
+}
+
+function build_locked_window_image_action_params(locked_window, action_params)
+{
+	return {
+		source: build_locked_window_image_source(locked_window, action_params),
+		reference: action_params.reference,
+		tolerance: action_params.tolerance,
+		threshold: action_params.threshold,
+		allow_partial_match: action_params.allow_partial_match,
+		minimum_overlap_ratio: action_params.minimum_overlap_ratio,
+		sample_step: action_params.sample_step,
+		match_anchor: action_params.match_anchor,
+		offset_x: action_params.offset_x,
+		offset_y: action_params.offset_y,
+		style: action_params.style,
+		duration_ms: action_params.duration_ms,
+		steps: action_params.steps,
+		random_seed: action_params.random_seed,
+		include_effective_seed: action_params.include_effective_seed,
+		randomization_amount: action_params.randomization_amount,
+		speed_profile: action_params.speed_profile,
+		speed_variation_amount: action_params.speed_variation_amount,
+		min_step_delay_ms: action_params.min_step_delay_ms,
+		max_step_delay_ms: action_params.max_step_delay_ms,
+		wave_amplitude: action_params.wave_amplitude,
+		wave_frequency: action_params.wave_frequency,
+		humanization_amount: action_params.humanization_amount
+	};
 }
 
 function prepare_scoped_keyboard_target(params)
@@ -2040,15 +2325,7 @@ function create_locked_window(params)
 			var action_params = search_params || {};
 
 			return find_image_in_source({
-				source: {
-					type: 'locked_window',
-					locked_window: this,
-					x: action_params.x,
-					y: action_params.y,
-					width: action_params.width,
-					height: action_params.height,
-					require_active: action_params.require_active === true
-				},
+				source: build_locked_window_image_source(this, action_params),
 				reference: action_params.reference,
 				tolerance: action_params.tolerance
 			});
@@ -2058,15 +2335,7 @@ function create_locked_window(params)
 			var action_params = search_params || {};
 
 			return find_all_images_in_source({
-				source: {
-					type: 'locked_window',
-					locked_window: this,
-					x: action_params.x,
-					y: action_params.y,
-					width: action_params.width,
-					height: action_params.height,
-					require_active: action_params.require_active === true
-				},
+				source: build_locked_window_image_source(this, action_params),
 				reference: action_params.reference,
 				tolerance: action_params.tolerance,
 				max_results: action_params.max_results
@@ -2077,15 +2346,7 @@ function create_locked_window(params)
 			var action_params = search_params || {};
 
 			return find_fuzzy_image_in_source({
-				source: {
-					type: 'locked_window',
-					locked_window: this,
-					x: action_params.x,
-					y: action_params.y,
-					width: action_params.width,
-					height: action_params.height,
-					require_active: action_params.require_active === true
-				},
+				source: build_locked_window_image_source(this, action_params),
 				reference: action_params.reference,
 				threshold: action_params.threshold,
 				tolerance: action_params.tolerance,
@@ -2093,6 +2354,74 @@ function create_locked_window(params)
 				minimum_overlap_ratio: action_params.minimum_overlap_ratio,
 				sample_step: action_params.sample_step
 			});
+		},
+		moveMouseToImage: function(search_params)
+		{
+			var action_params = search_params || {};
+			var result = run_image_mouse_move_action({
+				action_params: build_locked_window_image_action_params(this, action_params),
+				find_match: find_image_in_source,
+				path: false,
+				require_coordinate_source: false
+			});
+
+			if (result.match && result.match.target)
+			{
+				locked_target = result.match.target;
+			}
+
+			return result;
+		},
+		moveMousePathToImage: function(search_params)
+		{
+			var action_params = search_params || {};
+			var result = run_image_mouse_move_action({
+				action_params: build_locked_window_image_action_params(this, action_params),
+				find_match: find_image_in_source,
+				path: true,
+				require_coordinate_source: false
+			});
+
+			if (result.match && result.match.target)
+			{
+				locked_target = result.match.target;
+			}
+
+			return result;
+		},
+		moveMouseToImageFuzzy: function(search_params)
+		{
+			var action_params = search_params || {};
+			var result = run_image_mouse_move_action({
+				action_params: build_locked_window_image_action_params(this, action_params),
+				find_match: find_fuzzy_image_in_source,
+				path: false,
+				require_coordinate_source: false
+			});
+
+			if (result.match && result.match.target)
+			{
+				locked_target = result.match.target;
+			}
+
+			return result;
+		},
+		moveMousePathToImageFuzzy: function(search_params)
+		{
+			var action_params = search_params || {};
+			var result = run_image_mouse_move_action({
+				action_params: build_locked_window_image_action_params(this, action_params),
+				find_match: find_fuzzy_image_in_source,
+				path: true,
+				require_coordinate_source: false
+			});
+
+			if (result.match && result.match.target)
+			{
+				locked_target = result.match.target;
+			}
+
+			return result;
 		},
 		capture: function(capture_params)
 		{
@@ -2297,6 +2626,38 @@ module.exports.desktop = {
 		});
 
 		return build_public_mouse_path_result(path_result);
+	},
+	moveMouseToImage: function(params)
+	{
+		return run_image_mouse_move_action({
+			action_params: params || {},
+			find_match: find_image_in_source,
+			path: false
+		});
+	},
+	moveMousePathToImage: function(params)
+	{
+		return run_image_mouse_move_action({
+			action_params: params || {},
+			find_match: find_image_in_source,
+			path: true
+		});
+	},
+	moveMouseToImageFuzzy: function(params)
+	{
+		return run_image_mouse_move_action({
+			action_params: params || {},
+			find_match: find_fuzzy_image_in_source,
+			path: false
+		});
+	},
+	moveMousePathToImageFuzzy: function(params)
+	{
+		return run_image_mouse_move_action({
+			action_params: params || {},
+			find_match: find_fuzzy_image_in_source,
+			path: true
+		});
 	},
 	mouseClickTarget: function(params)
 	{

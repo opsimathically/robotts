@@ -1,4 +1,5 @@
 #include <napi.h>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
@@ -1539,33 +1540,90 @@ static MMBitmapRef BuildMMBitmapFromJsObject(const Napi::Object& obj)
 	                      img.bytesPerPixel);
 }
 
+typedef struct search_match_result_t {
+	bool found;
+	bool hasCandidate;
+	double score;
+	size_t x;
+	size_t y;
+	size_t width;
+	size_t height;
+	double overlapRatio;
+} search_match_result_t;
+
+typedef struct fuzzy_overlap_t {
+	size_t needleLeft;
+	size_t needleTop;
+	size_t needleRight;
+	size_t needleBottom;
+	size_t visibleX;
+	size_t visibleY;
+	size_t width;
+	size_t height;
+	double overlapRatio;
+} fuzzy_overlap_t;
+
+typedef struct fuzzy_anchor_t {
+	size_t x;
+	size_t y;
+	MMRGBColor color;
+	size_t colorCount;
+	size_t order;
+} fuzzy_anchor_t;
+
+typedef struct fuzzy_candidate_result_t {
+	bool valid;
+	double score;
+	int offsetX;
+	int offsetY;
+	fuzzy_overlap_t overlap;
+} fuzzy_candidate_result_t;
+
+static search_match_result_t MakeSearchMatchResult(bool found,
+	                                              bool has_candidate,
+	                                              double score,
+	                                              size_t x,
+	                                              size_t y,
+	                                              size_t width,
+	                                              size_t height,
+	                                              double overlap_ratio)
+{
+	search_match_result_t result;
+	result.found = found;
+	result.hasCandidate = has_candidate;
+	result.score = score;
+	result.x = x;
+	result.y = y;
+	result.width = width;
+	result.height = height;
+	result.overlapRatio = overlap_ratio;
+	return result;
+}
+
 static Napi::Object BuildSearchMatchObject(Napi::Env env,
-	                                      bool found,
-	                                      double score,
-	                                      size_t x,
-	                                      size_t y,
-	                                      size_t width,
-	                                      size_t height)
+	                                      const search_match_result_t& match_result)
 {
 	Napi::Object result = Napi::Object::New(env);
-	result.Set("found", Napi::Boolean::New(env, found));
-	if (found)
+	result.Set("found", Napi::Boolean::New(env, match_result.found));
+	if (match_result.hasCandidate)
 	{
 		Napi::Object location = Napi::Object::New(env);
 		Napi::Object size = Napi::Object::New(env);
-		location.Set("x", Napi::Number::New(env, x));
-		location.Set("y", Napi::Number::New(env, y));
-		size.Set("width", Napi::Number::New(env, width));
-		size.Set("height", Napi::Number::New(env, height));
-		result.Set("score", Napi::Number::New(env, score));
+		location.Set("x", Napi::Number::New(env, match_result.x));
+		location.Set("y", Napi::Number::New(env, match_result.y));
+		size.Set("width", Napi::Number::New(env, match_result.width));
+		size.Set("height", Napi::Number::New(env, match_result.height));
+		result.Set("score", Napi::Number::New(env, match_result.score));
 		result.Set("location", location);
 		result.Set("size", size);
+		result.Set("overlap_ratio", Napi::Number::New(env, match_result.overlapRatio));
 	}
 	else
 	{
 		result.Set("score", env.Null());
 		result.Set("location", env.Null());
 		result.Set("size", env.Null());
+		result.Set("overlap_ratio", env.Null());
 	}
 
 	return result;
@@ -1623,113 +1681,432 @@ static size_t GetFuzzySampleStep(size_t width, size_t height, size_t explicitSte
 	return 1;
 }
 
-static Napi::Object FindBestFuzzyBitmapMatch(Napi::Env env,
-	                                        MMBitmapRef needle,
-	                                        MMBitmapRef haystack,
-	                                        double threshold,
-	                                        double tolerance,
-	                                        bool allowPartialMatch,
-	                                        double minimumOverlapRatio,
-	                                        size_t sampleStep)
+static size_t CountFuzzyColorOccurrences(MMBitmapRef bitmap, const MMRGBColor& color)
 {
+	size_t count = 0;
+
+	for (size_t y = 0; y < bitmap->height; ++y)
+	{
+		for (size_t x = 0; x < bitmap->width; ++x)
+		{
+			if (MMRGBColorEqualToColor(GetBitmapColorAt(bitmap, x, y), color))
+			{
+				++count;
+			}
+		}
+	}
+
+	return count;
+}
+
+static bool IsSameAnchorPoint(const fuzzy_anchor_t& anchor, size_t x, size_t y)
+{
+	return anchor.x == x && anchor.y == y;
+}
+
+static void AddFuzzyAnchorCandidate(std::vector<fuzzy_anchor_t> *candidates,
+	                               MMBitmapRef needle,
+	                               size_t x,
+	                               size_t y,
+	                               size_t order)
+{
+	for (size_t index = 0; index < candidates->size(); ++index)
+	{
+		if (IsSameAnchorPoint((*candidates)[index], x, y))
+		{
+			return;
+		}
+	}
+
+	fuzzy_anchor_t anchor;
+	anchor.x = x;
+	anchor.y = y;
+	anchor.color = GetBitmapColorAt(needle, x, y);
+	anchor.colorCount = CountFuzzyColorOccurrences(needle, anchor.color);
+	anchor.order = order;
+	candidates->push_back(anchor);
+}
+
+static void SortFuzzyAnchors(std::vector<fuzzy_anchor_t> *anchors)
+{
+	for (size_t left = 0; left < anchors->size(); ++left)
+	{
+		size_t best_index = left;
+
+		for (size_t right = left + 1; right < anchors->size(); ++right)
+		{
+			if ((*anchors)[right].colorCount < (*anchors)[best_index].colorCount ||
+			    ((*anchors)[right].colorCount == (*anchors)[best_index].colorCount &&
+			     (*anchors)[right].order < (*anchors)[best_index].order))
+			{
+				best_index = right;
+			}
+		}
+
+		if (best_index != left)
+		{
+			fuzzy_anchor_t swap = (*anchors)[left];
+			(*anchors)[left] = (*anchors)[best_index];
+			(*anchors)[best_index] = swap;
+		}
+	}
+}
+
+static std::vector<fuzzy_anchor_t> BuildFuzzyAnchors(MMBitmapRef needle)
+{
+	std::vector<fuzzy_anchor_t> candidates;
+	std::vector<fuzzy_anchor_t> anchors;
+	const size_t last_x = needle->width - 1;
+	const size_t last_y = needle->height - 1;
+	const size_t mid_x = last_x / 2;
+	const size_t mid_y = last_y / 2;
+	const size_t quarter_x = last_x / 4;
+	const size_t quarter_y = last_y / 4;
+	const size_t three_quarter_x = (last_x * 3) / 4;
+	const size_t three_quarter_y = (last_y * 3) / 4;
+
+	candidates.reserve(17);
+	anchors.reserve(8);
+
+	AddFuzzyAnchorCandidate(&candidates, needle, mid_x, mid_y, 0);
+	AddFuzzyAnchorCandidate(&candidates, needle, last_x, last_y, 1);
+	AddFuzzyAnchorCandidate(&candidates, needle, 0, 0, 2);
+	AddFuzzyAnchorCandidate(&candidates, needle, last_x, 0, 3);
+	AddFuzzyAnchorCandidate(&candidates, needle, 0, last_y, 4);
+	AddFuzzyAnchorCandidate(&candidates, needle, mid_x, 0, 5);
+	AddFuzzyAnchorCandidate(&candidates, needle, 0, mid_y, 6);
+	AddFuzzyAnchorCandidate(&candidates, needle, last_x, mid_y, 7);
+	AddFuzzyAnchorCandidate(&candidates, needle, mid_x, last_y, 8);
+	AddFuzzyAnchorCandidate(&candidates, needle, quarter_x, quarter_y, 9);
+	AddFuzzyAnchorCandidate(&candidates, needle, three_quarter_x, quarter_y, 10);
+	AddFuzzyAnchorCandidate(&candidates, needle, quarter_x, three_quarter_y, 11);
+	AddFuzzyAnchorCandidate(&candidates, needle, three_quarter_x, three_quarter_y, 12);
+	AddFuzzyAnchorCandidate(&candidates, needle, mid_x, quarter_y, 13);
+	AddFuzzyAnchorCandidate(&candidates, needle, quarter_x, mid_y, 14);
+	AddFuzzyAnchorCandidate(&candidates, needle, three_quarter_x, mid_y, 15);
+	AddFuzzyAnchorCandidate(&candidates, needle, mid_x, three_quarter_y, 16);
+
+	SortFuzzyAnchors(&candidates);
+
+	for (size_t index = 0; index < candidates.size() && index < 8; ++index)
+	{
+		anchors.push_back(candidates[index]);
+	}
+
+	return anchors;
+}
+
+static bool IsPointOnSampleGrid(size_t x, size_t y, size_t start_x, size_t start_y, size_t sample_step)
+{
+	return ((x - start_x) % sample_step) == 0 && ((y - start_y) % sample_step) == 0;
+}
+
+static bool BuildFuzzyOverlap(MMBitmapRef needle,
+	                         MMBitmapRef haystack,
+	                         int offset_x,
+	                         int offset_y,
+	                         double minimum_overlap_ratio,
+	                         fuzzy_overlap_t *overlap)
+{
+	int overlap_left = offset_x < 0 ? -offset_x : 0;
+	int overlap_top = offset_y < 0 ? -offset_y : 0;
+	int overlap_right = static_cast<int>(needle->width);
+	int overlap_bottom = static_cast<int>(needle->height);
+
+	if (offset_x + overlap_right > static_cast<int>(haystack->width))
+	{
+		overlap_right = static_cast<int>(haystack->width) - offset_x;
+	}
+
+	if (offset_y + overlap_bottom > static_cast<int>(haystack->height))
+	{
+		overlap_bottom = static_cast<int>(haystack->height) - offset_y;
+	}
+
+	if (overlap_left >= overlap_right || overlap_top >= overlap_bottom)
+	{
+		return false;
+	}
+
+	overlap->needleLeft = static_cast<size_t>(overlap_left);
+	overlap->needleTop = static_cast<size_t>(overlap_top);
+	overlap->needleRight = static_cast<size_t>(overlap_right);
+	overlap->needleBottom = static_cast<size_t>(overlap_bottom);
+	overlap->width = static_cast<size_t>(overlap_right - overlap_left);
+	overlap->height = static_cast<size_t>(overlap_bottom - overlap_top);
+	overlap->visibleX = static_cast<size_t>(offset_x < 0 ? 0 : offset_x);
+	overlap->visibleY = static_cast<size_t>(offset_y < 0 ? 0 : offset_y);
+	overlap->overlapRatio = static_cast<double>(overlap->width * overlap->height) /
+		static_cast<double>(needle->width * needle->height);
+
+	return overlap->overlapRatio >= minimum_overlap_ratio;
+}
+
+static size_t CountFuzzySearchSamples(const fuzzy_overlap_t& overlap,
+	                                 const std::vector<fuzzy_anchor_t>& anchors,
+	                                 size_t sample_step)
+{
+	size_t sample_count = 0;
+
+	for (size_t index = 0; index < anchors.size(); ++index)
+	{
+		const fuzzy_anchor_t& anchor = anchors[index];
+		if (anchor.x >= overlap.needleLeft && anchor.x < overlap.needleRight &&
+		    anchor.y >= overlap.needleTop && anchor.y < overlap.needleBottom &&
+		    !IsPointOnSampleGrid(anchor.x, anchor.y, overlap.needleLeft, overlap.needleTop, sample_step))
+		{
+			++sample_count;
+		}
+	}
+
+	for (size_t needle_y = overlap.needleTop; needle_y < overlap.needleBottom; needle_y += sample_step)
+	{
+		for (size_t needle_x = overlap.needleLeft; needle_x < overlap.needleRight; needle_x += sample_step)
+		{
+			++sample_count;
+		}
+	}
+
+	return sample_count;
+}
+
+static double NormalizeFuzzySimilarity(MMRGBColor needle_color, MMRGBColor haystack_color, double tolerance)
+{
+	double similarity = ColorSimilarity(needle_color, haystack_color);
+
+	if (similarity < (1.0 - tolerance))
+	{
+		similarity = 0.0;
+	}
+
+	return similarity;
+}
+
+static fuzzy_candidate_result_t EvaluateFuzzyCandidate(MMBitmapRef needle,
+	                                                  MMBitmapRef haystack,
+	                                                  int offset_x,
+	                                                  int offset_y,
+	                                                  const fuzzy_overlap_t& overlap,
+	                                                  double tolerance,
+	                                                  size_t sample_step,
+	                                                  const std::vector<fuzzy_anchor_t>& anchors,
+	                                                  double best_score)
+{
+	fuzzy_candidate_result_t result;
+	const size_t total_samples = CountFuzzySearchSamples(overlap, anchors, sample_step);
+	double score_total = 0.0;
+	size_t processed_samples = 0;
+
+	result.valid = false;
+	result.score = -1.0;
+	result.offsetX = offset_x;
+	result.offsetY = offset_y;
+	result.overlap = overlap;
+
+	if (total_samples == 0)
+	{
+		return result;
+	}
+
+	for (size_t index = 0; index < anchors.size(); ++index)
+	{
+		const fuzzy_anchor_t& anchor = anchors[index];
+		if (anchor.x < overlap.needleLeft || anchor.x >= overlap.needleRight ||
+		    anchor.y < overlap.needleTop || anchor.y >= overlap.needleBottom ||
+		    IsPointOnSampleGrid(anchor.x, anchor.y, overlap.needleLeft, overlap.needleTop, sample_step))
+		{
+			continue;
+		}
+
+		score_total += NormalizeFuzzySimilarity(anchor.color,
+		                                       GetBitmapColorAt(haystack,
+		                                                       static_cast<size_t>(offset_x + static_cast<int>(anchor.x)),
+		                                                       static_cast<size_t>(offset_y + static_cast<int>(anchor.y))),
+		                                       tolerance);
+		++processed_samples;
+
+		if (best_score >= 0.0)
+		{
+			const double max_possible_score =
+				(score_total + static_cast<double>(total_samples - processed_samples)) /
+				static_cast<double>(total_samples);
+			if (max_possible_score < best_score)
+			{
+				return result;
+			}
+		}
+	}
+
+	for (size_t needle_y = overlap.needleTop; needle_y < overlap.needleBottom; needle_y += sample_step)
+	{
+		for (size_t needle_x = overlap.needleLeft; needle_x < overlap.needleRight; needle_x += sample_step)
+		{
+			score_total += NormalizeFuzzySimilarity(GetBitmapColorAt(needle, needle_x, needle_y),
+			                                       GetBitmapColorAt(haystack,
+			                                                       static_cast<size_t>(offset_x + static_cast<int>(needle_x)),
+			                                                       static_cast<size_t>(offset_y + static_cast<int>(needle_y))),
+			                                       tolerance);
+			++processed_samples;
+
+			if (best_score >= 0.0)
+			{
+				const double max_possible_score =
+					(score_total + static_cast<double>(total_samples - processed_samples)) /
+					static_cast<double>(total_samples);
+				if (max_possible_score < best_score)
+				{
+					return result;
+				}
+			}
+		}
+	}
+
+	result.valid = true;
+	result.score = score_total / static_cast<double>(total_samples);
+	return result;
+}
+
+static double ScoreFuzzyCandidateFully(MMBitmapRef needle,
+	                                  MMBitmapRef haystack,
+	                                  int offset_x,
+	                                  int offset_y,
+	                                  const fuzzy_overlap_t& overlap,
+	                                  double tolerance)
+{
+	double score_total = 0.0;
+	const size_t total_pixels = overlap.width * overlap.height;
+
+	if (total_pixels == 0)
+	{
+		return -1.0;
+	}
+
+	for (size_t needle_y = overlap.needleTop; needle_y < overlap.needleBottom; ++needle_y)
+	{
+		for (size_t needle_x = overlap.needleLeft; needle_x < overlap.needleRight; ++needle_x)
+		{
+			score_total += NormalizeFuzzySimilarity(GetBitmapColorAt(needle, needle_x, needle_y),
+			                                       GetBitmapColorAt(haystack,
+			                                                       static_cast<size_t>(offset_x + static_cast<int>(needle_x)),
+			                                                       static_cast<size_t>(offset_y + static_cast<int>(needle_y))),
+			                                       tolerance);
+		}
+	}
+
+	return score_total / static_cast<double>(total_pixels);
+}
+
+static search_match_result_t FindBestFuzzyBitmapMatch(MMBitmapRef needle,
+	                                                 MMBitmapRef haystack,
+	                                                 double threshold,
+	                                                 double tolerance,
+	                                                 bool allowPartialMatch,
+	                                                 double minimumOverlapRatio,
+	                                                 size_t sampleStep)
+{
+	search_match_result_t no_candidate = MakeSearchMatchResult(false, false, 0.0, 0, 0, 0, 0, 0.0);
+
 	if (needle == NULL || haystack == NULL)
 	{
-		return BuildSearchMatchObject(env, false, 0.0, 0, 0, 0, 0);
+		return no_candidate;
 	}
 
 	if (needle->width == 0 || needle->height == 0 || haystack->width == 0 || haystack->height == 0)
 	{
-		return BuildSearchMatchObject(env, false, 0.0, 0, 0, 0, 0);
+		return no_candidate;
+	}
+
+	if (!allowPartialMatch && (needle->width > haystack->width || needle->height > haystack->height))
+	{
+		return no_candidate;
 	}
 
 	const int minX = allowPartialMatch ? -(static_cast<int>(needle->width) - 1) : 0;
 	const int minY = allowPartialMatch ? -(static_cast<int>(needle->height) - 1) : 0;
 	const int maxX = allowPartialMatch ? static_cast<int>(haystack->width) - 1 : static_cast<int>(haystack->width - needle->width);
 	const int maxY = allowPartialMatch ? static_cast<int>(haystack->height) - 1 : static_cast<int>(haystack->height - needle->height);
-	double bestScore = -1.0;
-	size_t bestX = 0;
-	size_t bestY = 0;
-
-	if (!allowPartialMatch && (needle->width > haystack->width || needle->height > haystack->height))
-	{
-		return BuildSearchMatchObject(env, false, 0.0, 0, 0, 0, 0);
-	}
+	const std::vector<fuzzy_anchor_t> anchors = BuildFuzzyAnchors(needle);
+	double best_score = -1.0;
+	bool has_candidate = false;
+	int best_offset_x = 0;
+	int best_offset_y = 0;
+	fuzzy_overlap_t best_overlap = { 0, 0, 0, 0, 0, 0, 0, 0, 0.0 };
 
 	for (int offsetY = minY; offsetY <= maxY; ++offsetY)
 	{
 		for (int offsetX = minX; offsetX <= maxX; ++offsetX)
 		{
-			int overlapLeft = offsetX < 0 ? -offsetX : 0;
-			int overlapTop = offsetY < 0 ? -offsetY : 0;
-			int overlapRight = static_cast<int>(needle->width);
-			int overlapBottom = static_cast<int>(needle->height);
-			double scoreTotal = 0.0;
-			size_t sampleCount = 0;
+			fuzzy_overlap_t overlap;
 
-			if (offsetX + overlapRight > static_cast<int>(haystack->width))
-			{
-				overlapRight = static_cast<int>(haystack->width) - offsetX;
-			}
-
-			if (offsetY + overlapBottom > static_cast<int>(haystack->height))
-			{
-				overlapBottom = static_cast<int>(haystack->height) - offsetY;
-			}
-
-			if (overlapLeft >= overlapRight || overlapTop >= overlapBottom)
+			if (!BuildFuzzyOverlap(needle, haystack, offsetX, offsetY, minimumOverlapRatio, &overlap))
 			{
 				continue;
 			}
 
-			const size_t overlapWidth = static_cast<size_t>(overlapRight - overlapLeft);
-			const size_t overlapHeight = static_cast<size_t>(overlapBottom - overlapTop);
-			const double overlapRatio = static_cast<double>(overlapWidth * overlapHeight) /
-				static_cast<double>(needle->width * needle->height);
+			const fuzzy_candidate_result_t candidate = EvaluateFuzzyCandidate(needle,
+			                                                               haystack,
+			                                                               offsetX,
+			                                                               offsetY,
+			                                                               overlap,
+			                                                               tolerance,
+			                                                               sampleStep,
+			                                                               anchors,
+			                                                               best_score);
 
-			if (overlapRatio < minimumOverlapRatio)
+			if (!candidate.valid)
 			{
 				continue;
 			}
 
-			for (int needleY = overlapTop; needleY < overlapBottom; needleY += static_cast<int>(sampleStep))
+			if (!has_candidate || candidate.score > best_score)
 			{
-				for (int needleX = overlapLeft; needleX < overlapRight; needleX += static_cast<int>(sampleStep))
-				{
-					MMRGBColor needleColor = GetBitmapColorAt(needle, static_cast<size_t>(needleX), static_cast<size_t>(needleY));
-					MMRGBColor haystackColor = GetBitmapColorAt(haystack,
-					                                          static_cast<size_t>(offsetX + needleX),
-					                                          static_cast<size_t>(offsetY + needleY));
-					double similarity = ColorSimilarity(needleColor, haystackColor);
-					if (similarity < (1.0 - tolerance))
-					{
-						similarity = 0.0;
-					}
-					scoreTotal += similarity;
-					++sampleCount;
-				}
-			}
-
-			if (sampleCount == 0)
-			{
-				continue;
-			}
-
-			const double score = scoreTotal / static_cast<double>(sampleCount);
-			if (score > bestScore)
-			{
-				bestScore = score;
-				bestX = static_cast<size_t>(offsetX < 0 ? 0 : offsetX);
-				bestY = static_cast<size_t>(offsetY < 0 ? 0 : offsetY);
+				has_candidate = true;
+				best_score = candidate.score;
+				best_offset_x = candidate.offsetX;
+				best_offset_y = candidate.offsetY;
+				best_overlap = candidate.overlap;
 			}
 		}
 	}
 
-	if (bestScore >= threshold)
+	if (!has_candidate)
 	{
-		return BuildSearchMatchObject(env, true, bestScore, bestX, bestY, needle->width, needle->height);
+		return no_candidate;
 	}
 
-	return BuildSearchMatchObject(env, false, bestScore, 0, 0, 0, 0);
+	const double final_score = ScoreFuzzyCandidateFully(needle,
+	                                                  haystack,
+	                                                  best_offset_x,
+	                                                  best_offset_y,
+	                                                  best_overlap,
+	                                                  tolerance);
+	const bool found = final_score >= threshold;
+
+	return MakeSearchMatchResult(found,
+	                            true,
+	                            final_score,
+	                            best_overlap.visibleX,
+	                            best_overlap.visibleY,
+	                            best_overlap.width,
+	                            best_overlap.height,
+	                            best_overlap.overlapRatio);
+}
+
+static bool IsFiniteNumberValue(const Napi::Value& value, double *result)
+{
+	if (!value.IsNumber())
+	{
+		return false;
+	}
+
+	const double numeric_value = value.As<Napi::Number>().DoubleValue();
+	if (!std::isfinite(numeric_value))
+	{
+		return false;
+	}
+
+	*result = numeric_value;
+	return true;
 }
 
 Napi::Value getColorWrapper(const Napi::CallbackInfo& info)
@@ -1778,8 +2155,14 @@ Napi::Value loadBitmapFromFileWrapper(const Napi::CallbackInfo& info)
 
 	std::string path = info[0].As<Napi::String>();
 	const char *extension = getExtension(path.c_str(), path.size());
-	const MMImageType imageType = extension != NULL ? imageTypeFromExtension(extension) : kInvalidImageType;
+	MMImageType imageType = kInvalidImageType;
 	MMIOError errorCode = kMMIOUnsupportedTypeError;
+
+	if (extension != NULL)
+	{
+		imageType = imageTypeFromExtension(extension);
+	}
+
 	MMBitmapRef bitmap = newMMBitmapFromFile(path.c_str(), imageType, &errorCode);
 
 	if (bitmap == NULL)
@@ -1824,12 +2207,9 @@ Napi::Value findBitmapWrapper(const Napi::CallbackInfo& info)
 
 	const int searchResult = findBitmapInBitmap(needle, haystack, &point, tolerance);
 	result = BuildSearchMatchObject(env,
-	                               searchResult == 0,
-	                               searchResult == 0 ? 1.0 : 0.0,
-	                               point.x,
-	                               point.y,
-	                               needle->width,
-	                               needle->height);
+	                               searchResult == 0
+	                               	? MakeSearchMatchResult(true, true, 1.0, point.x, point.y, needle->width, needle->height, 1.0)
+	                               	: MakeSearchMatchResult(false, false, 0.0, 0, 0, 0, 0, 0.0));
 
 	destroyMMBitmap(haystack);
 	destroyMMBitmap(needle);
@@ -1865,7 +2245,7 @@ Napi::Value findAllBitmapsWrapper(const Napi::CallbackInfo& info)
 	{
 		const MMPoint point = MMPointArrayGetItem(matches, index);
 		result.Set(index,
-		          BuildSearchMatchObject(env, true, 1.0, point.x, point.y, needle->width, needle->height));
+		          BuildSearchMatchObject(env, MakeSearchMatchResult(true, true, 1.0, point.x, point.y, needle->width, needle->height, 1.0)));
 	}
 
 	destroyMMPointArray(matches);
@@ -1886,11 +2266,33 @@ Napi::Value findFuzzyBitmapWrapper(const Napi::CallbackInfo& info)
 
 	MMBitmapRef haystack = BuildMMBitmapFromJsObject(info[0].ToObject());
 	MMBitmapRef needle = BuildMMBitmapFromJsObject(info[1].ToObject());
-	const double threshold = info.Length() > 2 ? info[2].As<Napi::Number>().DoubleValue() : 0.85;
-	const double tolerance = info.Length() > 3 ? info[3].As<Napi::Number>().DoubleValue() : 0.15;
+	double threshold = 0.85;
+	double tolerance = 0.15;
 	const bool allowPartialMatch = info.Length() > 4 ? info[4].As<Napi::Boolean>().Value() : false;
-	const double minimumOverlapRatio = info.Length() > 5 ? info[5].As<Napi::Number>().DoubleValue() : 0.6;
-	const size_t sampleStep = info.Length() > 6 ? info[6].As<Napi::Number>().Uint32Value() : 0;
+	double minimumOverlapRatio = 0.6;
+	size_t sampleStep = 0;
+	double sampleStepValue = 0.0;
+
+	if ((info.Length() > 2 && !IsFiniteNumberValue(info[2], &threshold)) ||
+	    (info.Length() > 3 && !IsFiniteNumberValue(info[3], &tolerance)) ||
+	    (info.Length() > 5 && !IsFiniteNumberValue(info[5], &minimumOverlapRatio)) ||
+	    (info.Length() > 6 && !IsFiniteNumberValue(info[6], &sampleStepValue)))
+	{
+		destroyMMBitmap(haystack);
+		destroyMMBitmap(needle);
+		Napi::Error::New(env, "Invalid fuzzy bitmap search bounds specified.").ThrowAsJavaScriptException();
+		return env.Null();
+	}
+
+	if (sampleStepValue < 0.0 || std::floor(sampleStepValue) != sampleStepValue)
+	{
+		destroyMMBitmap(haystack);
+		destroyMMBitmap(needle);
+		Napi::Error::New(env, "Invalid fuzzy bitmap search bounds specified.").ThrowAsJavaScriptException();
+		return env.Null();
+	}
+
+	sampleStep = static_cast<size_t>(sampleStepValue);
 
 	if (threshold < 0.0 || threshold > 1.0 || tolerance < 0.0 || tolerance > 1.0 ||
 	    minimumOverlapRatio < 0.0 || minimumOverlapRatio > 1.0)
@@ -1901,14 +2303,14 @@ Napi::Value findFuzzyBitmapWrapper(const Napi::CallbackInfo& info)
 		return env.Null();
 	}
 
-	Napi::Object result = FindBestFuzzyBitmapMatch(env,
-	                                             needle,
-	                                             haystack,
-	                                             threshold,
-	                                             tolerance,
-	                                             allowPartialMatch,
-	                                             minimumOverlapRatio,
-	                                             GetFuzzySampleStep(needle->width, needle->height, sampleStep));
+	Napi::Object result = BuildSearchMatchObject(env,
+	                                           FindBestFuzzyBitmapMatch(needle,
+	                                                                   haystack,
+	                                                                   threshold,
+	                                                                   tolerance,
+	                                                                   allowPartialMatch,
+	                                                                   minimumOverlapRatio,
+	                                                                   GetFuzzySampleStep(needle->width, needle->height, sampleStep)));
 
 	destroyMMBitmap(haystack);
 	destroyMMBitmap(needle);

@@ -47,6 +47,19 @@ The current layout matters, but it is not a long-term architecture commitment.
 
 Treat these as the present implementation, not as a frozen design target.
 
+## Repository Orientation
+
+Use these files and directories as the fastest orientation path when preparing work in this repository:
+
+- `index.js` is the main CommonJS wrapper and currently contains most high-level runtime behavior, validation, desktop/window helpers, pathing logic, clipboard flows, and image-search orchestration.
+- `index.mjs` is the ESM surface and currently re-exports only a subset of the richer CommonJS API.
+- `index.d.ts` is the handwritten TypeScript contract for the current public surface.
+- `src/robotjs.cc` is the native addon bridge and the primary entrypoint for Linux desktop/session, input, screen, clipboard, and bitmap-search bindings.
+- `binding.gyp` defines the current native build shape and still reflects some inherited legacy cross-platform structure.
+- `test/` contains the current unit-like and integration-style JavaScript tests.
+
+Deeper implementation findings, export inventories, validation notes, and drift between runtime, types, docs, and tests should be recorded in `docs/repo_context.md` instead of expanding this policy file.
+
 ## API And Package Evolution
 
 Agents are explicitly authorized to redesign the public API, package layout, module structure, typings layout, and surrounding developer experience when that improves usability, capability, maintainability, or correctness.

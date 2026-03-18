@@ -114,6 +114,7 @@ describe('Image Search', () => {
 	var single_pixel_reference_path = path.join(temp_dir, 'single-pixel.png');
 	var fuzzy_haystack_path = path.join(temp_dir, 'fuzzy.png');
 	var partial_haystack_path = path.join(temp_dir, 'partial.png');
+	var dual_fuzzy_haystack_path = path.join(temp_dir, 'dual-fuzzy.png');
 
 	beforeAll(function()
 	{
@@ -174,6 +175,16 @@ describe('Image Search', () => {
 			pixels: [
 				[[200, 10, 10]],
 				[[10, 10, 200]]
+			]
+		});
+
+		WritePng({
+			output_path: dual_fuzzy_haystack_path,
+			width: 4,
+			height: 2,
+			pixels: [
+				[[170, 40, 40], [40, 170, 40], [200, 10, 10], [10, 200, 10]],
+				[[40, 40, 170], [180, 180, 80], [10, 10, 200], [220, 220, 40]]
 			]
 		});
 	});
@@ -241,6 +252,26 @@ describe('Image Search', () => {
 		expect(results[1].location).toEqual({ x: 2, y: 0 });
 	});
 
+	it('returns the top-left exact match first.', function()
+	{
+		var haystack = robot.image_search.loadReference({
+			png_path: repeated_haystack_path
+		});
+		var result = robot.image_search.find({
+			source: {
+				type: 'bitmap',
+				bitmap: haystack
+			},
+			reference: {
+				png_path: single_pixel_reference_path
+			}
+		});
+
+		expect(result.found).toBeTruthy();
+		expect(result.location).toEqual({ x: 0, y: 0 });
+		expect(result.overlap_ratio).toEqual(1);
+	});
+
 	it('returns a typed no-match result when no exact match exists.', function()
 	{
 		var haystack = robot.image_search.loadReference({
@@ -259,6 +290,27 @@ describe('Image Search', () => {
 
 		expect(result.found).toBeFalsy();
 		expect(result.location).toBeNull();
+	});
+
+	it('throws for invalid exact-search tolerance values.', function()
+	{
+		var haystack = robot.image_search.loadReference({
+			png_path: haystack_path
+		});
+
+		expect(function()
+		{
+			robot.image_search.find({
+				source: {
+					type: 'bitmap',
+					bitmap: haystack
+				},
+				reference: {
+					png_path: reference_path
+				},
+				tolerance: -0.01
+			});
+		}).toThrowError(/between 0 and 1/);
 	});
 
 	it('finds a fuzzy match with small color variance.', function()
@@ -280,6 +332,91 @@ describe('Image Search', () => {
 
 		expect(result.found).toBeTruthy();
 		expect(result.score).toBeGreaterThan(0.7);
+		expect(result.location).toEqual({ x: 0, y: 0 });
+		expect(result.size).toEqual({ width: 2, height: 2 });
+		expect(result.overlap_ratio).toEqual(1);
+	});
+
+	it('returns the best fuzzy score instead of the earliest acceptable match.', function()
+	{
+		var haystack = robot.image_search.loadReference({
+			png_path: dual_fuzzy_haystack_path
+		});
+		var result = robot.image_search.findFuzzy({
+			source: {
+				type: 'bitmap',
+				bitmap: haystack
+			},
+			reference: {
+				png_path: reference_path
+			},
+			threshold: 0.7,
+			tolerance: 0.2
+		});
+
+		expect(result.found).toBeTruthy();
+		expect(result.location).toEqual({ x: 2, y: 0 });
+		expect(result.score).toEqual(1);
+	});
+
+	it('returns fuzzy near-miss details when the best candidate misses the threshold.', function()
+	{
+		var haystack = robot.image_search.loadReference({
+			png_path: fuzzy_haystack_path
+		});
+		var result = robot.image_search.findFuzzy({
+			source: {
+				type: 'bitmap',
+				bitmap: haystack
+			},
+			reference: {
+				png_path: reference_path
+			},
+			threshold: 0.99,
+			tolerance: 0.2
+		});
+
+		expect(result.found).toBeFalsy();
+		expect(result.score).not.toBeNull();
+		expect(result.score).toBeGreaterThan(0.9);
+		expect(result.location).toEqual({ x: 0, y: 0 });
+		expect(result.size).toEqual({ width: 2, height: 2 });
+		expect(result.overlap_ratio).toEqual(1);
+	});
+
+	it('throws for invalid fuzzy-search bounds.', function()
+	{
+		var haystack = robot.image_search.loadReference({
+			png_path: fuzzy_haystack_path
+		});
+
+		expect(function()
+		{
+			robot.image_search.findFuzzy({
+				source: {
+					type: 'bitmap',
+					bitmap: haystack
+				},
+				reference: {
+					png_path: reference_path
+				},
+				threshold: 1.01
+			});
+		}).toThrowError(/threshold|bounds/);
+
+		expect(function()
+		{
+			robot.image_search.findFuzzy({
+				source: {
+					type: 'bitmap',
+					bitmap: haystack
+				},
+				reference: {
+					png_path: reference_path
+				},
+				sample_step: 1.5
+			});
+		}).toThrowError(/sample_step|bounds/);
 	});
 
 	it('finds a fuzzy partial match when partial matching is enabled.', function()
@@ -303,6 +440,42 @@ describe('Image Search', () => {
 
 		expect(result.found).toBeTruthy();
 		expect(result.score).toBeGreaterThan(0.95);
+		expect(result.location).toEqual({ x: 0, y: 0 });
+		expect(result.size).toEqual({ width: 1, height: 2 });
+		expect(result.overlap_ratio).toEqual(0.5);
+	});
+
+	it('returns the same final fuzzy score for automatic and explicit sample steps on stable fixtures.', function()
+	{
+		var haystack = robot.image_search.loadReference({
+			png_path: fuzzy_haystack_path
+		});
+		var automatic = robot.image_search.findFuzzy({
+			source: {
+				type: 'bitmap',
+				bitmap: haystack
+			},
+			reference: {
+				png_path: reference_path
+			},
+			threshold: 0.7,
+			tolerance: 0.2
+		});
+		var explicit = robot.image_search.findFuzzy({
+			source: {
+				type: 'bitmap',
+				bitmap: haystack
+			},
+			reference: {
+				png_path: reference_path
+			},
+			threshold: 0.7,
+			tolerance: 0.2,
+			sample_step: 2
+		});
+
+		expect(automatic.location).toEqual(explicit.location);
+		expect(automatic.score).toEqual(explicit.score);
 	});
 
 	it('throws cleanly for an invalid PNG reference path.', function()

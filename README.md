@@ -325,6 +325,56 @@ const result = robot.desktop.mouseClickPath({
 console.log(result);
 ```
 
+### Image-Match Movement
+
+Move directly to the center of an exact image match:
+
+```ts
+import robot from "robotts";
+
+const result = robot.desktop.moveMouseToImage({
+  source: {
+    type: "screen",
+  },
+  reference: {
+    png_path: "./fixtures/login-button.png",
+  },
+});
+
+if (result.moved) {
+  console.log(result.destination, result.match.global_location);
+}
+```
+
+Move along a human-like path to a fuzzy match using offsets:
+
+```ts
+import robot from "robotts";
+
+const result = robot.desktop.moveMousePathToImageFuzzy({
+  source: {
+    type: "screen",
+  },
+  reference: {
+    png_path: "./fixtures/status-badge.png",
+  },
+  threshold: 0.9,
+  tolerance: 0.12,
+  match_anchor: "top_left",
+  offset_x: 12,
+  offset_y: 8,
+  style: "human_like",
+  duration_ms: 200,
+  steps: 20,
+  speed_profile: "humanized",
+  include_effective_seed: true,
+});
+
+if (!result.moved) {
+  console.log("image was not accepted", result.match.score);
+}
+```
+
 ## Keyboard Input
 
 Basic keyboard actions:
@@ -495,6 +545,8 @@ if (result.found) {
 }
 ```
 
+When the search source maps back to the real desktop, `location` is relative to the searched source and `global_location` is the absolute screen coordinate for the match origin. The image-based mouse movement helpers use that absolute coordinate plus the selected anchor and offsets.
+
 Load and reuse a PNG reference across multiple searches:
 
 ```ts
@@ -569,9 +621,12 @@ if (result.found) {
   console.log("fuzzy match", {
     score: result.score,
     location: result.location,
+    overlap_ratio: result.overlap_ratio,
   });
 }
 ```
+
+`threshold` is the minimum accepted confidence in the `0..1` range. Fuzzy search always evaluates candidates as "best score wins", and `score` reports the best measured confidence for the returned candidate. When partial matching is enabled, `size` reflects the actual matched overlap inside the searched source and `overlap_ratio` reports how much of the reference image was covered.
 
 Search inside a strict target window:
 
@@ -625,6 +680,28 @@ const fuzzy_match = locked_window.findImageFuzzy({
 console.log({ exact_match, fuzzy_match });
 ```
 
+Move to a match inside a locked window:
+
+```ts
+import robot from "robotts";
+
+const locked_window = robot.desktop.lockWindow({
+  title_includes: "Firefox",
+});
+
+const move_result = locked_window.moveMousePathToImage({
+  reference: {
+    png_path: "./fixtures/toolbar-button.png",
+  },
+  match_anchor: "center",
+  style: "human_like",
+  duration_ms: 180,
+  steps: 18,
+});
+
+console.log(move_result);
+```
+
 Handle the typed no-match result:
 
 ```ts
@@ -643,10 +720,15 @@ if (!result.found) {
   console.log("no match", {
     source_type: result.source_type,
     reference_type: result.reference_type,
+    score: result.score,
     location: result.location,
   });
 }
 ```
+
+For exact searches, a true no-match result keeps `score` and `location` as `null`. For fuzzy searches, `found: false` can still include the best candidate's `score`, `location`, `size`, and `overlap_ratio` when nothing cleared the requested threshold.
+
+The image-based mouse movement methods return a combined result with `found`, `moved`, `match`, and `destination`. If no accepted match exists, they return `moved: false`, keep the search result in `match`, and do not move the mouse.
 
 Scoped window searches still fail closed. If a targeted or locked window disappears, RobotTS throws a structured scoped-window error instead of silently searching some other window.
 

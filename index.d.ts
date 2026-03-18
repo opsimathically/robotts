@@ -295,6 +295,7 @@ export type image_search_result_t = {
 	score: number | null;
 	location: point_t | null;
 	size: size_t | null;
+	overlap_ratio: number | null;
 	global_location: point_t | null;
 	source_type: string;
 	reference_type: "bitmap" | "png_path";
@@ -318,6 +319,53 @@ export type fuzzy_image_search_params_t = image_search_params_t & {
 	minimum_overlap_ratio?: number;
 	sample_step?: number;
 };
+
+export type image_match_anchor_t = "center" | "top_left";
+
+export type image_match_move_options_t = {
+	match_anchor?: image_match_anchor_t;
+	offset_x?: number;
+	offset_y?: number;
+};
+
+export type image_move_params_t = image_search_params_t & image_match_move_options_t;
+export type image_move_path_params_t = image_move_params_t & mouse_path_options_t;
+export type fuzzy_image_move_params_t = fuzzy_image_search_params_t & image_match_move_options_t;
+export type fuzzy_image_move_path_params_t = fuzzy_image_move_params_t & mouse_path_options_t;
+
+export type image_mouse_move_result_t = {
+	found: boolean;
+	moved: boolean;
+	match: image_search_result_t;
+	destination: point_t | null;
+	effective_seed?: string | number;
+};
+
+export type locked_image_search_params_t = {
+	reference: image_reference_t;
+	tolerance?: number;
+	x?: number;
+	y?: number;
+	width?: number;
+	height?: number;
+	require_active?: boolean;
+};
+
+export type locked_image_search_all_params_t = locked_image_search_params_t & {
+	max_results?: number;
+};
+
+export type locked_fuzzy_image_search_params_t = locked_image_search_params_t & {
+	threshold?: number;
+	allow_partial_match?: boolean;
+	minimum_overlap_ratio?: number;
+	sample_step?: number;
+};
+
+export type locked_image_move_params_t = locked_image_search_params_t & image_match_move_options_t;
+export type locked_image_move_path_params_t = locked_image_move_params_t & mouse_path_options_t;
+export type locked_fuzzy_image_move_params_t = locked_fuzzy_image_search_params_t & image_match_move_options_t;
+export type locked_fuzzy_image_move_path_params_t = locked_fuzzy_image_move_params_t & mouse_path_options_t;
 
 export type load_image_reference_params_t = {
 	png_path: string;
@@ -417,38 +465,13 @@ export type locked_window_t = {
 	typeStringHumanized(params: typing_humanized_params_t): typing_result_t;
 	doubleClickHumanized(params?: locked_double_click_humanized_params_t): double_click_result_t;
 	copySelection<return_t = clipboard_copy_result_t>(params?: locked_clipboard_copy_params_t<return_t>): Promise<return_t | clipboard_copy_result_t>;
-	findImage(params: {
-		reference: image_reference_t;
-		tolerance?: number;
-		x?: number;
-		y?: number;
-		width?: number;
-		height?: number;
-		require_active?: boolean;
-	}): image_search_result_t;
-	findAllImages(params: {
-		reference: image_reference_t;
-		tolerance?: number;
-		max_results?: number;
-		x?: number;
-		y?: number;
-		width?: number;
-		height?: number;
-		require_active?: boolean;
-	}): image_search_result_t[];
-	findImageFuzzy(params: {
-		reference: image_reference_t;
-		threshold?: number;
-		tolerance?: number;
-		allow_partial_match?: boolean;
-		minimum_overlap_ratio?: number;
-		sample_step?: number;
-		x?: number;
-		y?: number;
-		width?: number;
-		height?: number;
-		require_active?: boolean;
-	}): image_search_result_t;
+	findImage(params: locked_image_search_params_t): image_search_result_t;
+	findAllImages(params: locked_image_search_all_params_t): image_search_result_t[];
+	findImageFuzzy(params: locked_fuzzy_image_search_params_t): image_search_result_t;
+	moveMouseToImage(params: locked_image_move_params_t): image_mouse_move_result_t;
+	moveMousePathToImage(params: locked_image_move_path_params_t): image_mouse_move_result_t;
+	moveMouseToImageFuzzy(params: locked_fuzzy_image_move_params_t): image_mouse_move_result_t;
+	moveMousePathToImageFuzzy(params: locked_fuzzy_image_move_path_params_t): image_mouse_move_result_t;
 	capture(params?: locked_capture_params_t): bitmap_t;
 };
 
@@ -489,6 +512,10 @@ export interface desktop_api_i {
 	focusWindow(params: window_target_query_t): window_target_t;
 	moveMouseTarget(params: target_point_params_t): void;
 	moveMousePath(params: mouse_path_target_params_t): mouse_path_result_t;
+	moveMouseToImage(params: image_move_params_t): image_mouse_move_result_t;
+	moveMousePathToImage(params: image_move_path_params_t): image_mouse_move_result_t;
+	moveMouseToImageFuzzy(params: fuzzy_image_move_params_t): image_mouse_move_result_t;
+	moveMousePathToImageFuzzy(params: fuzzy_image_move_path_params_t): image_mouse_move_result_t;
 	mouseClickTarget(params: mouse_click_target_params_t): void;
 	mouseClickPath(params: mouse_click_path_params_t): mouse_path_result_t;
 	doubleClickTargetHumanized(params: double_click_target_humanized_params_t): double_click_result_t;
