@@ -56,12 +56,19 @@
     
     'sources': [
       'src/robotjs.cc',
+      'src/UTHashTable.c',
       'src/deadbeef_rand.c',
+      'src/MMPointArray.c',
       'src/mouse.c',
       'src/keypress.c',
       'src/keycode.c',
       'src/screen.c',
       'src/screengrab.c',
+      'src/bitmap_find.c',
+      'src/bmp_io.c',
+      'src/color_find.c',
+      'src/io.c',
+      'src/png_io.c',
       'src/snprintf.c',
       'src/MMBitmap.c'
     ]

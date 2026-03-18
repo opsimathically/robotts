@@ -55,7 +55,7 @@ MMBitmapRef copyMMBitmapFromPortion(MMBitmapRef source, MMRect rect);
 /* Get pointer to pixel of MMBitmapRef. No bounds checking is performed (check
  * yourself before calling this with MMBitmapPointInBounds(). */
 #define MMRGBColorRefAtPoint(image, x, y) \
-	(MMRGBColor *)(assert(MMBitmapPointInBounds(bitmap, MMPointMake(x, y))), \
+	(MMRGBColor *)(assert(MMBitmapPointInBounds(image, MMPointMake(x, y))), \
 	               ((image)->imageBuffer) + (((image)->bytewidth * (y)) \
 	                                      + ((x) * (image)->bytesPerPixel)))
 

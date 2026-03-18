@@ -1,7 +1,24 @@
 var crypto = require('node:crypto');
+var child_process = require('node:child_process');
+var fs = require('node:fs');
+var path = require('node:path');
 var robotjs = require('./build/Release/robotjs.node');
 
 module.exports = robotjs;
+
+class ScopedWindowError extends Error
+{
+	constructor(params)
+	{
+		super(params.message);
+		this.name = 'ScopedWindowError';
+		this.code = params.code;
+		this.details = params.details || null;
+	}
+}
+
+module.exports.ScopedWindowError = ScopedWindowError;
+var image_reference_cache = new Map();
 
 function bitmap(width, height, byte_width, bits_per_pixel, bytes_per_pixel, image)
 {
@@ -16,6 +33,18 @@ function bitmap(width, height, byte_width, bits_per_pixel, bytes_per_pixel, imag
 	{
 		return robotjs.getColor(this, x, y);
 	};
+}
+
+function create_bitmap_wrapper(bitmap_data)
+{
+	return new bitmap(
+		bitmap_data.width,
+		bitmap_data.height,
+		bitmap_data.byteWidth,
+		bitmap_data.bitsPerPixel,
+		bitmap_data.bytesPerPixel,
+		bitmap_data.image
+	);
 }
 
 function rectangles_intersect(first_rect, second_rect)
@@ -155,6 +184,50 @@ function sleep_ms(duration_ms)
 	Atomics.wait(shared_view, 0, 0, duration_ms);
 }
 
+function sleep_async(duration_ms)
+{
+	return new Promise(function(resolve)
+	{
+		setTimeout(resolve, duration_ms);
+	});
+}
+
+function create_scoped_window_error(params)
+{
+	return new ScopedWindowError({
+		code: params.code,
+		message: params.message,
+		details: params.details
+	});
+}
+
+function throw_scoped_window_error(params)
+{
+	throw create_scoped_window_error(params);
+}
+
+function is_bitmap_like(value)
+{
+	return !!(value &&
+		typeof value.width === 'number' &&
+		typeof value.height === 'number' &&
+		typeof value.byteWidth === 'number' &&
+		typeof value.bitsPerPixel === 'number' &&
+		typeof value.bytesPerPixel === 'number' &&
+		value.image &&
+		typeof value.colorAt === 'function');
+}
+
+function assert_bitmap_like(value, error_message)
+{
+	if (!is_bitmap_like(value))
+	{
+		throw new Error(error_message || 'A valid bitmap reference is required.');
+	}
+
+	return value;
+}
+
 function get_verified_window_context(params)
 {
 	var desktop_state = get_desktop_state();
@@ -164,7 +237,14 @@ function get_verified_window_context(params)
 
 	if (!desktop_state.capabilities || !desktop_state.capabilities.supportsStrictTargetVerification)
 	{
-		throw new Error('Strict window target verification is not supported in the current Linux session.');
+		throw_scoped_window_error({
+			code: 'WINDOW_VERIFICATION_UNSUPPORTED',
+			message: 'Strict window target verification is not supported in the current Linux session.',
+			details: {
+				session: desktop_state.session,
+				capabilities: desktop_state.capabilities
+			}
+		});
 	}
 
 	if (!target)
@@ -175,7 +255,13 @@ function get_verified_window_context(params)
 	window_item = get_window_by_id(desktop_state, target.windowId);
 	if (!window_item)
 	{
-		throw new Error('The requested window target no longer exists.');
+		throw_scoped_window_error({
+			code: 'WINDOW_NOT_FOUND',
+			message: 'The requested window target no longer exists.',
+			details: {
+				target: target
+			}
+		});
 	}
 
 	target = build_window_target(desktop_state, window_item);
@@ -184,7 +270,14 @@ function get_verified_window_context(params)
 	{
 		if (!desktop_state.activeWindow || String(desktop_state.activeWindow.windowId) !== String(target.windowId))
 		{
-			throw new Error('The requested window target is not active.');
+			throw_scoped_window_error({
+				code: 'WINDOW_NOT_ACTIVE',
+				message: 'The requested window target is not active.',
+				details: {
+					target: target,
+					active_window: desktop_state.activeWindow
+				}
+			});
 		}
 	}
 
@@ -228,7 +321,13 @@ function focus_and_verify_window_target(params)
 		timeout_ms: params && typeof params.timeout_ms !== 'undefined' ? params.timeout_ms : 1000
 	}))
 	{
-		throw new Error('The requested window target could not be focused.');
+		throw_scoped_window_error({
+			code: 'WINDOW_FOCUS_FAILED',
+			message: 'The requested window target could not be focused.',
+			details: {
+				target: context.target
+			}
+		});
 	}
 
 	return get_verified_window_context({
@@ -245,7 +344,14 @@ function resolve_window_target(params)
 
 	if (!desktop_state.capabilities || !desktop_state.capabilities.supportsWindowDiscovery)
 	{
-		throw new Error('Window discovery is not supported in the current Linux session.');
+		throw_scoped_window_error({
+			code: 'WINDOW_DISCOVERY_UNSUPPORTED',
+			message: 'Window discovery is not supported in the current Linux session.',
+			details: {
+				session: desktop_state.session,
+				capabilities: desktop_state.capabilities
+			}
+		});
 	}
 
 	for (var index = 0; index < desktop_state.windows.length; index += 1)
@@ -259,12 +365,25 @@ function resolve_window_target(params)
 
 	if (candidate_windows.length === 0)
 	{
-		throw new Error('No window matched the requested target criteria.');
+		throw_scoped_window_error({
+			code: 'WINDOW_TARGET_NOT_FOUND',
+			message: 'No window matched the requested target criteria.',
+			details: {
+				query: window_query
+			}
+		});
 	}
 
 	if (candidate_windows.length > 1)
 	{
-		throw new Error('Window target resolution was ambiguous.');
+		throw_scoped_window_error({
+			code: 'WINDOW_TARGET_AMBIGUOUS',
+			message: 'Window target resolution was ambiguous.',
+			details: {
+				query: window_query,
+				match_count: candidate_windows.length
+			}
+		});
 	}
 
 	return build_window_target(desktop_state, candidate_windows[0]);
@@ -298,7 +417,14 @@ function get_absolute_point_for_target(params)
 
 	if (!context.window_item || !context.window_item.geometry)
 	{
-		throw new Error('The requested window target does not have usable geometry.');
+		throw_scoped_window_error({
+			code: 'WINDOW_GEOMETRY_UNAVAILABLE',
+			message: 'The requested window target does not have usable geometry.',
+			details: {
+				target: context.target,
+				window: context.window_item
+			}
+		});
 	}
 
 	if (params.relative_to === 'global')
@@ -931,6 +1057,791 @@ function build_public_mouse_path_result(path_result)
 	return public_result;
 }
 
+function load_image_reference_from_png(params)
+{
+	var action_params = params || {};
+	var png_path = typeof action_params.png_path === 'string' ? action_params.png_path.trim() : '';
+	var use_cache = action_params.use_cache !== false;
+	var resolved_path;
+	var bitmap_item;
+
+	if (!png_path)
+	{
+		throw new Error('A non-empty png_path is required.');
+	}
+
+	resolved_path = path.resolve(png_path);
+
+	if (!fs.existsSync(resolved_path))
+	{
+		throw new Error('The requested PNG reference path does not exist.');
+	}
+
+	if (use_cache && image_reference_cache.has(resolved_path))
+	{
+		return image_reference_cache.get(resolved_path);
+	}
+
+	bitmap_item = create_bitmap_wrapper(robotjs.loadBitmapFromFile(resolved_path));
+	assert_bitmap_like(bitmap_item, 'The PNG reference could not be loaded as a bitmap.');
+
+	if (use_cache)
+	{
+		image_reference_cache.set(resolved_path, bitmap_item);
+	}
+
+	return bitmap_item;
+}
+
+function normalize_image_reference(reference)
+{
+	if (!reference || typeof reference !== 'object')
+	{
+		throw new Error('An image reference object is required.');
+	}
+
+	if (reference.bitmap)
+	{
+		return {
+			reference_type: 'bitmap',
+			bitmap: assert_bitmap_like(reference.bitmap, 'A valid bitmap reference is required.'),
+			png_path: null
+		};
+	}
+
+	if (reference.png_path)
+	{
+		var resolved_path = path.resolve(reference.png_path);
+
+		return {
+			reference_type: 'png_path',
+			bitmap: load_image_reference_from_png({
+				png_path: resolved_path,
+				use_cache: reference.use_cache !== false
+			}),
+			png_path: resolved_path
+		};
+	}
+
+	throw new Error('The image reference must provide either bitmap or png_path.');
+}
+
+function build_source_region(params)
+{
+	var source = params.source || {};
+	var x = typeof source.x !== 'undefined' ? source.x : 0;
+	var y = typeof source.y !== 'undefined' ? source.y : 0;
+	var width = typeof source.width !== 'undefined' ? source.width : null;
+	var height = typeof source.height !== 'undefined' ? source.height : null;
+
+	return {
+		x: x,
+		y: y,
+		width: width,
+		height: height
+	};
+}
+
+function capture_image_search_source(params)
+{
+	var source = params.source || {
+		type: 'screen'
+	};
+	var region = build_source_region(params);
+	var display_item;
+	var target;
+	var bitmap_item;
+
+	switch (source.type)
+	{
+		case 'screen':
+			if (region.width !== null && region.height !== null)
+			{
+				bitmap_item = module.exports.screen.capture(region.x, region.y, region.width, region.height);
+			}
+			else
+			{
+				bitmap_item = module.exports.screen.capture();
+			}
+
+			return {
+				source_type: 'screen',
+				bitmap: bitmap_item,
+				offset_x: region.width !== null ? region.x : 0,
+				offset_y: region.height !== null ? region.y : 0,
+				target: null,
+				display_id: null
+			};
+		case 'display':
+			display_item = module.exports.desktop.listDisplays().find(function(item)
+			{
+				return item.id === source.display_id;
+			});
+
+			if (!display_item)
+			{
+				throw new Error('The requested display source does not exist.');
+			}
+
+			if (region.width !== null && region.height !== null)
+			{
+				bitmap_item = module.exports.screen.capture(
+					display_item.x + region.x,
+					display_item.y + region.y,
+					region.width,
+					region.height
+				);
+			}
+			else
+			{
+				bitmap_item = module.exports.screen.captureDisplay({
+					display_id: source.display_id
+				});
+			}
+
+			return {
+				source_type: 'display',
+				bitmap: bitmap_item,
+				offset_x: display_item.x + (region.width !== null ? region.x : 0),
+				offset_y: display_item.y + (region.height !== null ? region.y : 0),
+				target: null,
+				display_id: display_item.id
+			};
+		case 'region':
+			if (region.width === null || region.height === null)
+			{
+				throw new Error('Region image search sources require width and height.');
+			}
+
+			return {
+				source_type: 'region',
+				bitmap: module.exports.screen.capture(region.x, region.y, region.width, region.height),
+				offset_x: region.x,
+				offset_y: region.y,
+				target: null,
+				display_id: null
+			};
+		case 'bitmap':
+			return {
+				source_type: 'bitmap',
+				bitmap: assert_bitmap_like(source.bitmap, 'A valid bitmap image search source is required.'),
+				offset_x: null,
+				offset_y: null,
+				target: null,
+				display_id: null
+			};
+		case 'window':
+			target = assert_window_target({
+				target: source.target,
+				window_id: source.window_id,
+				title: source.title,
+				title_includes: source.title_includes,
+				class_name: source.class_name,
+				instance_name: source.instance_name,
+				pid: source.pid,
+				workspace_id: source.workspace_id,
+				monitor_id: source.monitor_id,
+				require_active: source.require_active === true
+			});
+			var window_context = get_verified_window_context({
+				target: target,
+				require_active: source.require_active === true
+			});
+
+			bitmap_item = module.exports.screen.captureWindow({
+				target: target,
+				x: region.x,
+				y: region.y,
+				width: region.width !== null ? region.width : window_context.window_item.geometry.width,
+				height: region.height !== null ? region.height : window_context.window_item.geometry.height,
+				require_active: source.require_active === true
+			});
+
+			return {
+				source_type: 'window',
+				bitmap: bitmap_item,
+				offset_x: window_context.window_item.geometry.x + region.x,
+				offset_y: window_context.window_item.geometry.y + region.y,
+				target: target,
+				display_id: target.displayId
+			};
+		case 'locked_window':
+			if (!source.locked_window || typeof source.locked_window.getTarget !== 'function' || typeof source.locked_window.capture !== 'function')
+			{
+				throw new Error('A valid locked_window source is required.');
+			}
+
+			target = source.locked_window.assert();
+			var locked_context = get_verified_window_context({
+				target: target,
+				require_active: source.require_active === true
+			});
+
+			bitmap_item = source.locked_window.capture({
+				x: region.x,
+				y: region.y,
+				width: region.width !== null ? region.width : locked_context.window_item.geometry.width,
+				height: region.height !== null ? region.height : locked_context.window_item.geometry.height,
+				require_active: source.require_active === true
+			});
+
+			return {
+				source_type: 'locked_window',
+				bitmap: bitmap_item,
+				offset_x: locked_context.window_item.geometry.x + region.x,
+				offset_y: locked_context.window_item.geometry.y + region.y,
+				target: target,
+				display_id: target.displayId
+			};
+		default:
+			throw new Error('Unsupported image search source type specified.');
+	}
+}
+
+function build_public_image_search_result(native_result, source_context, reference_context)
+{
+	var public_result = {
+		found: !!native_result.found,
+		score: native_result.score,
+		location: native_result.location,
+		size: native_result.size,
+		global_location: null,
+		source_type: source_context.source_type,
+		reference_type: reference_context.reference_type,
+		display_id: source_context.display_id,
+		target: source_context.target
+	};
+
+	if (public_result.found && public_result.location && source_context.offset_x !== null && source_context.offset_y !== null)
+	{
+		public_result.global_location = {
+			x: source_context.offset_x + public_result.location.x,
+			y: source_context.offset_y + public_result.location.y
+		};
+	}
+
+	return public_result;
+}
+
+function find_image_in_source(params)
+{
+	var action_params = params || {};
+	var source_context = capture_image_search_source(action_params);
+	var reference_context = normalize_image_reference(action_params.reference);
+	var native_result = robotjs.findBitmap(
+		source_context.bitmap,
+		reference_context.bitmap,
+		typeof action_params.tolerance !== 'undefined' ? action_params.tolerance : 0
+	);
+
+	return build_public_image_search_result(native_result, source_context, reference_context);
+}
+
+function find_all_images_in_source(params)
+{
+	var action_params = params || {};
+	var source_context = capture_image_search_source(action_params);
+	var reference_context = normalize_image_reference(action_params.reference);
+	var native_results = robotjs.findAllBitmaps(
+		source_context.bitmap,
+		reference_context.bitmap,
+		typeof action_params.tolerance !== 'undefined' ? action_params.tolerance : 0
+	);
+	var max_results = typeof action_params.max_results !== 'undefined' ? Math.max(1, Math.round(action_params.max_results)) : native_results.length;
+
+	return native_results.slice(0, max_results).map(function(native_result)
+	{
+		return build_public_image_search_result(native_result, source_context, reference_context);
+	});
+}
+
+function find_fuzzy_image_in_source(params)
+{
+	var action_params = params || {};
+	var source_context = capture_image_search_source(action_params);
+	var reference_context = normalize_image_reference(action_params.reference);
+	var native_result = robotjs.findFuzzyBitmap(
+		source_context.bitmap,
+		reference_context.bitmap,
+		typeof action_params.threshold !== 'undefined' ? action_params.threshold : 0.85,
+		typeof action_params.tolerance !== 'undefined' ? action_params.tolerance : 0.15,
+		action_params.allow_partial_match === true,
+		typeof action_params.minimum_overlap_ratio !== 'undefined' ? action_params.minimum_overlap_ratio : 0.6,
+		typeof action_params.sample_step !== 'undefined' ? action_params.sample_step : 0
+	);
+
+	return build_public_image_search_result(native_result, source_context, reference_context);
+}
+
+function prepare_scoped_keyboard_target(params)
+{
+	var target = params.target || resolve_window_target(params);
+
+	if (params.require_active === false)
+	{
+		return assert_window_target({
+			target: target,
+			require_active: false
+		});
+	}
+
+	return focus_and_verify_window_target({
+		target: target
+	});
+}
+
+function get_typing_humanization_level(level)
+{
+	if (typeof level === 'undefined' || level === null)
+	{
+		return 'medium';
+	}
+
+	if (level !== 'low' && level !== 'medium' && level !== 'high')
+	{
+		throw new Error('Invalid typing humanization level specified.');
+	}
+
+	return level;
+}
+
+function get_typing_delay_bounds(params)
+{
+	var level = get_typing_humanization_level(params.level);
+	var defaults = {
+		low: {
+			minimum_delay: 28,
+			maximum_delay: 70
+		},
+		medium: {
+			minimum_delay: 45,
+			maximum_delay: 125
+		},
+		high: {
+			minimum_delay: 75,
+			maximum_delay: 210
+		}
+	}[level];
+	var minimum_delay = typeof params.min_delay_ms !== 'undefined' ? Math.max(0, Math.round(params.min_delay_ms)) : defaults.minimum_delay;
+	var maximum_delay = typeof params.max_delay_ms !== 'undefined' ? Math.max(minimum_delay, Math.round(params.max_delay_ms)) : defaults.maximum_delay;
+
+	if (minimum_delay > maximum_delay)
+	{
+		throw new Error('Invalid typing delay bounds specified.');
+	}
+
+	return {
+		level: level,
+		minimum_delay: minimum_delay,
+		maximum_delay: maximum_delay
+	};
+}
+
+function build_humanized_typing_delays(params)
+{
+	var delays = [];
+	var index = 0;
+	var previous_character = params.characters[0] || '';
+
+	if (params.characters.length <= 1)
+	{
+		return delays;
+	}
+
+	for (index = 1; index < params.characters.length; index += 1)
+	{
+		var progress = index / (params.characters.length - 1);
+		var edge_slowdown = Math.pow((Math.cos(progress * Math.PI) + 1) / 2, 1.25);
+		var punctuation_pause = /[,.!?;:]/.test(previous_character) ? 0.45 : 0;
+		var whitespace_pause = /\s/.test(previous_character) ? 0.15 : 0;
+		var jitter = ((params.random() * 2) - 1) * 0.22;
+		var weighted_progress = clamp_number(0.45 + (edge_slowdown * 0.65) + punctuation_pause + whitespace_pause + jitter, 0, 1);
+
+		delays.push(Math.round(lerp_number(params.bounds.minimum_delay, params.bounds.maximum_delay, weighted_progress)));
+		previous_character = params.characters[index];
+	}
+
+	return delays;
+}
+
+function type_humanized_character(character)
+{
+	if (character === '\r')
+	{
+		return;
+	}
+
+	if (character === '\n')
+	{
+		robotjs.keyTap('enter');
+		return;
+	}
+
+	if (character === '\t')
+	{
+		robotjs.keyTap('tab');
+		return;
+	}
+
+	robotjs.unicodeTap(character.codePointAt(0));
+}
+
+function type_string_humanized(params)
+{
+	var action_params = params || {};
+	var text = typeof action_params.text === 'string' ? action_params.text : '';
+	var characters = Array.from(text);
+	var effective_seed = resolve_effective_seed({
+		random_seed: action_params.random_seed
+	});
+	var random_value = create_random_number_generator(effective_seed);
+	var bounds = get_typing_delay_bounds(action_params);
+	var typing_delays = build_humanized_typing_delays({
+		characters: characters,
+		random: random_value,
+		bounds: bounds
+	});
+	var elapsed_ms = 0;
+	var index = 0;
+
+	if (action_params.mistake_probability && action_params.mistake_probability > 0)
+	{
+		throw new Error('mistake_probability is not supported yet. Omit it or set it to 0.');
+	}
+
+	for (index = 0; index < characters.length; index += 1)
+	{
+		if (index > 0)
+		{
+			sleep_ms(typing_delays[index - 1]);
+			elapsed_ms += typing_delays[index - 1];
+		}
+
+		type_humanized_character(characters[index]);
+	}
+
+	return {
+		text: text,
+		elapsed_ms: elapsed_ms,
+		effective_seed: action_params.include_effective_seed ? effective_seed : undefined
+	};
+}
+
+function build_public_typing_result(typing_result)
+{
+	var public_result = {
+		text: typing_result.text,
+		elapsed_ms: typing_result.elapsed_ms
+	};
+
+	if (typeof typing_result.effective_seed !== 'undefined')
+	{
+		public_result.effective_seed = typing_result.effective_seed;
+	}
+
+	return public_result;
+}
+
+function get_double_click_humanization_level(level)
+{
+	if (typeof level === 'undefined' || level === null)
+	{
+		return 'medium';
+	}
+
+	if (level !== 'low' && level !== 'medium' && level !== 'high')
+	{
+		throw new Error('Invalid double-click humanization level specified.');
+	}
+
+	return level;
+}
+
+function get_double_click_interval_bounds(params)
+{
+	var level = get_double_click_humanization_level(params.level);
+	var defaults = {
+		low: {
+			minimum_interval: 105,
+			maximum_interval: 155
+		},
+		medium: {
+			minimum_interval: 130,
+			maximum_interval: 205
+		},
+		high: {
+			minimum_interval: 170,
+			maximum_interval: 260
+		}
+	}[level];
+	var minimum_interval = typeof params.min_interval_ms !== 'undefined' ? Math.max(30, Math.round(params.min_interval_ms)) : defaults.minimum_interval;
+	var maximum_interval = typeof params.max_interval_ms !== 'undefined' ? Math.max(minimum_interval, Math.round(params.max_interval_ms)) : defaults.maximum_interval;
+
+	if (minimum_interval > maximum_interval)
+	{
+		throw new Error('Invalid double-click interval bounds specified.');
+	}
+
+	return {
+		level: level,
+		minimum_interval: minimum_interval,
+		maximum_interval: maximum_interval
+	};
+}
+
+function double_click_humanized(params)
+{
+	var action_params = params || {};
+	var button = typeof action_params.button === 'string' ? action_params.button : 'left';
+	var effective_seed = resolve_effective_seed({
+		random_seed: action_params.random_seed
+	});
+	var random_value = create_random_number_generator(effective_seed);
+	var interval_bounds = get_double_click_interval_bounds(action_params);
+	var interval_ms = Math.round(lerp_number(
+		interval_bounds.minimum_interval,
+		interval_bounds.maximum_interval,
+		clamp_number(0.5 + (((random_value() * 2) - 1) * 0.35), 0, 1)
+	));
+
+	robotjs.mouseClick(button, false);
+	sleep_ms(interval_ms);
+
+	if (typeof action_params.before_second_click === 'function')
+	{
+		action_params.before_second_click();
+	}
+
+	robotjs.mouseClick(button, false);
+
+	return {
+		interval_ms: interval_ms,
+		effective_seed: action_params.include_effective_seed ? effective_seed : undefined
+	};
+}
+
+function build_public_double_click_result(double_click_result)
+{
+	var public_result = {
+		interval_ms: double_click_result.interval_ms
+	};
+
+	if (typeof double_click_result.effective_seed !== 'undefined')
+	{
+		public_result.effective_seed = double_click_result.effective_seed;
+	}
+
+	return public_result;
+}
+
+function get_clipboard_command_result(command, args, input_text)
+{
+	var command_result = child_process.spawnSync(command, args, {
+		input: input_text,
+		encoding: 'utf8'
+	});
+
+	if (command_result.error)
+	{
+		return {
+			ok: false,
+			error: command_result.error
+		};
+	}
+
+	if (command_result.status !== 0)
+	{
+		return {
+			ok: false,
+			error: new Error((command_result.stderr || '').trim() || ('Clipboard command failed: ' + command))
+		};
+	}
+
+	return {
+		ok: true,
+		stdout: command_result.stdout || ''
+	};
+}
+
+function clear_clipboard_text()
+{
+	var primary_error = null;
+	var command_result;
+
+	if (typeof robotjs.clearClipboardText === 'function')
+	{
+		try
+		{
+			robotjs.clearClipboardText();
+			return {
+				method: 'native_x11'
+			};
+		}
+		catch (error)
+		{
+			primary_error = error;
+		}
+	}
+
+	command_result = get_clipboard_command_result('xclip', ['-selection', 'clipboard'], '');
+	if (command_result.ok)
+	{
+		return {
+			method: 'xclip'
+		};
+	}
+
+	command_result = get_clipboard_command_result('xsel', ['--clipboard', '--input'], '');
+	if (command_result.ok)
+	{
+		return {
+			method: 'xsel'
+		};
+	}
+
+	throw create_scoped_window_error({
+		code: 'CLIPBOARD_UNAVAILABLE',
+		message: 'Clipboard access is not available in the current Linux session.',
+		details: {
+			native_error: primary_error ? primary_error.message : null
+		}
+	});
+}
+
+function read_clipboard_text()
+{
+	var primary_error = null;
+	var command_result;
+
+	if (typeof robotjs.getClipboardText === 'function')
+	{
+		try
+		{
+			return {
+				data: robotjs.getClipboardText(),
+				method: 'native_x11'
+			};
+		}
+		catch (error)
+		{
+			primary_error = error;
+		}
+	}
+
+	command_result = get_clipboard_command_result('xclip', ['-o', '-selection', 'clipboard'], null);
+	if (command_result.ok)
+	{
+		return {
+			data: command_result.stdout,
+			method: 'xclip'
+		};
+	}
+
+	command_result = get_clipboard_command_result('xsel', ['--clipboard', '--output'], null);
+	if (command_result.ok)
+	{
+		return {
+			data: command_result.stdout,
+			method: 'xsel'
+		};
+	}
+
+	throw create_scoped_window_error({
+		code: 'CLIPBOARD_UNAVAILABLE',
+		message: 'Clipboard access is not available in the current Linux session.',
+		details: {
+			native_error: primary_error ? primary_error.message : null
+		}
+	});
+}
+
+async function wait_for_clipboard_text(params)
+{
+	var started_at = Date.now();
+	var timeout_ms = typeof params.timeout_ms !== 'undefined' ? Math.max(50, Math.round(params.timeout_ms)) : 1500;
+	var poll_interval_ms = typeof params.poll_interval_ms !== 'undefined' ? Math.max(10, Math.round(params.poll_interval_ms)) : 50;
+	var last_result = null;
+
+	while ((Date.now() - started_at) <= timeout_ms)
+	{
+		last_result = read_clipboard_text();
+		if (typeof last_result.data === 'string' && last_result.data.length > 0)
+		{
+			return last_result;
+		}
+
+		await sleep_async(poll_interval_ms);
+	}
+
+	throw create_scoped_window_error({
+		code: 'CLIPBOARD_TIMEOUT',
+		message: 'Timed out waiting for clipboard text after the copy shortcut was sent.',
+		details: {
+			timeout_ms: timeout_ms,
+			last_method: last_result ? last_result.method : null
+		}
+	});
+}
+
+async function copy_selection_from_target(params)
+{
+	var action_params = params || {};
+	var target = action_params.target || resolve_window_target(action_params);
+	var active_target;
+	var clipboard_clear_result = null;
+	var clipboard_read_result = null;
+	var copy_context = null;
+	var copy_result = null;
+
+	if (action_params.require_active === true)
+	{
+		active_target = assert_window_target({
+			target: target,
+			require_active: true
+		});
+	}
+	else
+	{
+		active_target = focus_and_verify_window_target({
+			target: target
+		});
+	}
+
+	if (action_params.clear_clipboard !== false)
+	{
+		clipboard_clear_result = clear_clipboard_text();
+	}
+
+	robotjs.keyTap('c', 'control');
+	clipboard_read_result = await wait_for_clipboard_text(action_params);
+
+	var context = get_verified_window_context({
+		target: active_target,
+		require_active: false
+	});
+	copy_context = {
+		target: context.target,
+		window: context.window_item,
+		session: context.desktop_state.session,
+		backend: context.desktop_state.capabilities.backend,
+		timestamp: new Date().toISOString(),
+		copy_method: clipboard_read_result.method,
+		clear_method: clipboard_clear_result ? clipboard_clear_result.method : null,
+		clipboard_format: 'text/plain'
+	};
+	copy_result = {
+		data: clipboard_read_result.data,
+		context: copy_context
+	};
+
+	if (typeof action_params.callback === 'function')
+	{
+		return action_params.callback(copy_result);
+	}
+
+	return copy_result;
+}
+
 function create_locked_window(params)
 {
 	var locked_target = params.target;
@@ -957,58 +1868,57 @@ function create_locked_window(params)
 
 			return locked_target;
 		},
-			moveMouse: function(move_params)
-			{
-				var absolute_point = get_absolute_point_for_target({
-					target: locked_target,
+		moveMouse: function(move_params)
+		{
+			var absolute_point = get_absolute_point_for_target({
+				target: locked_target,
 				x: move_params.x,
 				y: move_params.y,
 				relative_to: 'window',
 				require_active: move_params && move_params.require_active === true
 			});
 
-				locked_target = absolute_point.target;
-				return robotjs.moveMouse(absolute_point.x, absolute_point.y);
-			},
-			moveMousePath: function(move_params)
-			{
-				var path_result = move_mouse_path({
-					target: locked_target,
-					x: move_params.x,
-					y: move_params.y,
-					relative_to: 'window',
-					require_active: move_params && move_params.require_active === true,
-					style: move_params && move_params.style,
-					duration_ms: move_params && move_params.duration_ms,
-					steps: move_params && move_params.steps,
-					random_seed: move_params && move_params.random_seed,
-					include_effective_seed: move_params && move_params.include_effective_seed,
-					randomization_amount: move_params && move_params.randomization_amount,
-					speed_profile: move_params && move_params.speed_profile,
-					speed_variation_amount: move_params && move_params.speed_variation_amount,
-					min_step_delay_ms: move_params && move_params.min_step_delay_ms,
-					max_step_delay_ms: move_params && move_params.max_step_delay_ms,
-					wave_amplitude: move_params && move_params.wave_amplitude,
-					wave_frequency: move_params && move_params.wave_frequency,
-					humanization_amount: move_params && move_params.humanization_amount
-				});
+			locked_target = absolute_point.target;
+			return robotjs.moveMouse(absolute_point.x, absolute_point.y);
+		},
+		moveMousePath: function(move_params)
+		{
+			var path_result = move_mouse_path({
+				target: locked_target,
+				x: move_params.x,
+				y: move_params.y,
+				relative_to: 'window',
+				require_active: move_params && move_params.require_active === true,
+				style: move_params && move_params.style,
+				duration_ms: move_params && move_params.duration_ms,
+				steps: move_params && move_params.steps,
+				random_seed: move_params && move_params.random_seed,
+				include_effective_seed: move_params && move_params.include_effective_seed,
+				randomization_amount: move_params && move_params.randomization_amount,
+				speed_profile: move_params && move_params.speed_profile,
+				speed_variation_amount: move_params && move_params.speed_variation_amount,
+				min_step_delay_ms: move_params && move_params.min_step_delay_ms,
+				max_step_delay_ms: move_params && move_params.max_step_delay_ms,
+				wave_amplitude: move_params && move_params.wave_amplitude,
+				wave_frequency: move_params && move_params.wave_frequency,
+				humanization_amount: move_params && move_params.humanization_amount
+			});
 
-				if (path_result.target)
-				{
-					locked_target = path_result.target;
-				}
-
-				return build_public_mouse_path_result(path_result);
-			},
-			mouseClick: function(click_params)
+			if (path_result.target)
 			{
-				var action_params = click_params || {};
-			var target = assert_window_target({
+				locked_target = path_result.target;
+			}
+
+			return build_public_mouse_path_result(path_result);
+		},
+		mouseClick: function(click_params)
+		{
+			var action_params = click_params || {};
+
+			locked_target = assert_window_target({
 				target: locked_target,
 				require_active: action_params.require_active !== false
 			});
-
-			locked_target = target;
 
 			if (typeof action_params.x !== 'undefined' && typeof action_params.y !== 'undefined')
 			{
@@ -1023,37 +1933,166 @@ function create_locked_window(params)
 				robotjs.moveMouse(absolute_point.x, absolute_point.y);
 			}
 
-				return robotjs.mouseClick(action_params.button, action_params.double);
-			},
-			mouseClickPath: function(click_params)
+			return robotjs.mouseClick(action_params.button, action_params.double);
+		},
+		mouseClickPath: function(click_params)
+		{
+			var action_params = click_params || {};
+			var path_result = this.moveMousePath(action_params);
+
+			locked_target = assert_window_target({
+				target: locked_target,
+				require_active: action_params.require_active !== false
+			});
+
+			robotjs.mouseClick(action_params.button, action_params.double);
+
+			return build_public_mouse_path_result(path_result);
+		},
+		doubleClickHumanized: function(click_params)
+		{
+			var action_params = click_params || {};
+
+			locked_target = assert_window_target({
+				target: locked_target,
+				require_active: action_params.require_active !== false
+			});
+
+			if (typeof action_params.x !== 'undefined' && typeof action_params.y !== 'undefined')
 			{
-				var action_params = click_params || {};
-				var path_result = this.moveMousePath(action_params);
-				var target = assert_window_target({
+				var absolute_point = get_absolute_point_for_target({
 					target: locked_target,
+					x: action_params.x,
+					y: action_params.y,
+					relative_to: 'window',
 					require_active: action_params.require_active !== false
 				});
+				locked_target = absolute_point.target;
+				robotjs.moveMouse(absolute_point.x, absolute_point.y);
+			}
 
-				locked_target = target;
-				robotjs.mouseClick(action_params.button, action_params.double);
-
-				return build_public_mouse_path_result(path_result);
-			},
-			keyTap: function(key_params)
-			{
-			locked_target = focus_and_verify_window_target({
-				target: locked_target
+			return build_public_double_click_result(double_click_humanized({
+				button: action_params.button,
+				level: action_params.level,
+				random_seed: action_params.random_seed,
+				include_effective_seed: action_params.include_effective_seed,
+				min_interval_ms: action_params.min_interval_ms,
+				max_interval_ms: action_params.max_interval_ms,
+				before_second_click: function()
+				{
+					locked_target = assert_window_target({
+						target: locked_target,
+						require_active: action_params.require_active !== false
+					});
+				}
+			}));
+		},
+		keyTap: function(key_params)
+		{
+			locked_target = prepare_scoped_keyboard_target({
+				target: locked_target,
+				require_active: key_params && key_params.require_active
 			});
 
 			return robotjs.keyTap(key_params.key, key_params.modifier);
 		},
 		typeString: function(type_params)
 		{
-			locked_target = focus_and_verify_window_target({
-				target: locked_target
+			locked_target = prepare_scoped_keyboard_target({
+				target: locked_target,
+				require_active: type_params && type_params.require_active
 			});
 
 			return robotjs.typeString(type_params.text);
+		},
+		typeStringHumanized: function(type_params)
+		{
+			locked_target = prepare_scoped_keyboard_target({
+				target: locked_target,
+				require_active: type_params && type_params.require_active
+			});
+
+			return build_public_typing_result(type_string_humanized(type_params));
+		},
+		copySelection: async function(copy_params)
+		{
+			var action_params = copy_params || {};
+
+			return copy_selection_from_target({
+				target: locked_target,
+				timeout_ms: action_params.timeout_ms,
+				poll_interval_ms: action_params.poll_interval_ms,
+				require_active: action_params.require_active === true,
+				clear_clipboard: action_params.clear_clipboard,
+				callback: action_params.callback
+			}).then(function(result)
+			{
+				if (result && result.context && result.context.target)
+				{
+					locked_target = result.context.target;
+				}
+
+				return result;
+			});
+		},
+		findImage: function(search_params)
+		{
+			var action_params = search_params || {};
+
+			return find_image_in_source({
+				source: {
+					type: 'locked_window',
+					locked_window: this,
+					x: action_params.x,
+					y: action_params.y,
+					width: action_params.width,
+					height: action_params.height,
+					require_active: action_params.require_active === true
+				},
+				reference: action_params.reference,
+				tolerance: action_params.tolerance
+			});
+		},
+		findAllImages: function(search_params)
+		{
+			var action_params = search_params || {};
+
+			return find_all_images_in_source({
+				source: {
+					type: 'locked_window',
+					locked_window: this,
+					x: action_params.x,
+					y: action_params.y,
+					width: action_params.width,
+					height: action_params.height,
+					require_active: action_params.require_active === true
+				},
+				reference: action_params.reference,
+				tolerance: action_params.tolerance,
+				max_results: action_params.max_results
+			});
+		},
+		findImageFuzzy: function(search_params)
+		{
+			var action_params = search_params || {};
+
+			return find_fuzzy_image_in_source({
+				source: {
+					type: 'locked_window',
+					locked_window: this,
+					x: action_params.x,
+					y: action_params.y,
+					width: action_params.width,
+					height: action_params.height,
+					require_active: action_params.require_active === true
+				},
+				reference: action_params.reference,
+				threshold: action_params.threshold,
+				tolerance: action_params.tolerance,
+				allow_partial_match: action_params.allow_partial_match,
+				minimum_overlap_ratio: action_params.minimum_overlap_ratio,
+				sample_step: action_params.sample_step
+			});
 		},
 		capture: function(capture_params)
 		{
@@ -1093,19 +2132,12 @@ module.exports.screen.capture = function(x, y, width, height)
 		bitmap_data = robotjs.captureScreen();
 	}
 
-	return new bitmap(
-		bitmap_data.width,
-		bitmap_data.height,
-		bitmap_data.byteWidth,
-		bitmap_data.bitsPerPixel,
-		bitmap_data.bytesPerPixel,
-		bitmap_data.image
-	);
+	return create_bitmap_wrapper(bitmap_data);
 };
 
 module.exports.screen.captureWindow = function(params)
 {
-	var target = assert_window_target({
+	var context = get_verified_window_context({
 		target: params.target,
 		window_id: params.window_id,
 		title: params.title,
@@ -1117,8 +2149,7 @@ module.exports.screen.captureWindow = function(params)
 		monitor_id: params.monitor_id,
 		require_active: params.require_active === true
 	});
-	var desktop_state = get_desktop_state();
-	var window_item = get_window_by_id(desktop_state, target.windowId);
+	var window_item = context.window_item;
 	var capture_x = window_item.geometry.x + (params.x || 0);
 	var capture_y = window_item.geometry.y + (params.y || 0);
 	var capture_width = typeof params.width !== 'undefined' ? params.width : window_item.geometry.width;
@@ -1147,6 +2178,25 @@ module.exports.screen.captureDisplay = function(params)
 	}
 
 	return module.exports.screen.capture(display_item.x, display_item.y, display_item.width, display_item.height);
+};
+
+module.exports.image_search = {
+	loadReference: function(params)
+	{
+		return load_image_reference_from_png(params);
+	},
+	find: function(params)
+	{
+		return find_image_in_source(params);
+	},
+	findAll: function(params)
+	{
+		return find_all_images_in_source(params);
+	},
+	findFuzzy: function(params)
+	{
+		return find_fuzzy_image_in_source(params);
+	}
 };
 
 module.exports.desktop = {
@@ -1269,6 +2319,41 @@ module.exports.desktop = {
 
 		return robotjs.mouseClick(params.button, params.double);
 	},
+	doubleClickTargetHumanized: function(params)
+	{
+		var target = assert_window_target({
+			target: params.target || resolve_window_target(params),
+			require_active: params.require_active !== false
+		});
+
+		if (typeof params.x !== 'undefined' && typeof params.y !== 'undefined')
+		{
+			var absolute_point = get_absolute_point_for_target({
+				target: target,
+				x: params.x,
+				y: params.y,
+				relative_to: params.relative_to,
+				require_active: params.require_active !== false
+			});
+			robotjs.moveMouse(absolute_point.x, absolute_point.y);
+		}
+
+		return build_public_double_click_result(double_click_humanized({
+			button: params.button,
+			level: params.level,
+			random_seed: params.random_seed,
+			include_effective_seed: params.include_effective_seed,
+			min_interval_ms: params.min_interval_ms,
+			max_interval_ms: params.max_interval_ms,
+			before_second_click: function()
+			{
+				assert_window_target({
+					target: target,
+					require_active: params.require_active !== false
+				});
+			}
+		}));
+	},
 	mouseClickPath: function(params)
 	{
 		var path_result = this.moveMousePath(params);
@@ -1286,42 +2371,43 @@ module.exports.desktop = {
 	},
 		keyTapTarget: function(params)
 		{
-			var target = params.target || resolve_window_target(params);
-
-			if (params.require_active === false)
-			{
-				assert_window_target({
-					target: target,
-					require_active: false
-				});
-			}
-			else
-			{
-				focus_and_verify_window_target({
-					target: target
-				});
-			}
+			prepare_scoped_keyboard_target({
+				target: params.target || resolve_window_target(params),
+				require_active: params.require_active
+			});
 
 			return robotjs.keyTap(params.key, params.modifier);
 		},
 		typeStringTarget: function(params)
 		{
-			var target = params.target || resolve_window_target(params);
-
-			if (params.require_active === false)
-			{
-				assert_window_target({
-					target: target,
-					require_active: false
-				});
-			}
-			else
-			{
-				focus_and_verify_window_target({
-					target: target
-				});
-			}
+			prepare_scoped_keyboard_target({
+				target: params.target || resolve_window_target(params),
+				require_active: params.require_active
+			});
 
 			return robotjs.typeString(params.text);
+		},
+		typeStringTargetHumanized: function(params)
+		{
+			prepare_scoped_keyboard_target({
+				target: params.target || resolve_window_target(params),
+				require_active: params.require_active
+			});
+
+			return build_public_typing_result(type_string_humanized(params));
+		},
+		copySelectionFromTarget: async function(params)
+		{
+			return copy_selection_from_target(params);
 		}
+};
+
+module.exports.typeStringHumanized = function(params)
+{
+	return build_public_typing_result(type_string_humanized(params));
+};
+
+module.exports.doubleClickHumanized = function(params)
+{
+	return build_public_double_click_result(double_click_humanized(params));
 };

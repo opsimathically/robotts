@@ -9,8 +9,11 @@
 #include "screen.h"
 #include "screengrab.h"
 #include "MMBitmap.h"
+#include "bitmap_find.h"
+#include "io.h"
 #include "snprintf.h"
 #include "microsleep.h"
+#include "rgb.h"
 #if defined(USE_X11)
 	#include "xdisplay.h"
 	#include <X11/Xatom.h>
@@ -21,6 +24,8 @@
 //Global delays.
 int mouseDelay = 10;
 int keyboardDelay = 10;
+
+static Napi::Object BuildBitmapObject(Napi::Env env, MMBitmapRef bitmap);
 
 #if defined(USE_X11)
 static Napi::Value NullableString(Napi::Env env, const std::string& value)
@@ -1331,6 +1336,78 @@ return env.Null();
 	return Napi::Number::New(env, 1);
 }
 
+Napi::Value getClipboardTextWrapper(const Napi::CallbackInfo& info)
+{
+	Napi::Env env = info.Env();
+
+	#if defined(USE_X11)
+	char *clipboardText = NULL;
+	char *errorMessage = NULL;
+
+	if (!XGetClipboardText(&clipboardText, &errorMessage))
+	{
+		const char *message = errorMessage != NULL ? errorMessage : "Could not read clipboard text.";
+		Napi::Error::New(env, message).ThrowAsJavaScriptException();
+		if (clipboardText != NULL)
+		{
+			free(clipboardText);
+		}
+		if (errorMessage != NULL)
+		{
+			free(errorMessage);
+		}
+		return env.Null();
+	}
+
+	Napi::Value result = Napi::String::New(env, clipboardText != NULL ? clipboardText : "");
+
+	if (clipboardText != NULL)
+	{
+		free(clipboardText);
+	}
+
+	if (errorMessage != NULL)
+	{
+		free(errorMessage);
+	}
+
+	return result;
+	#else
+	Napi::Error::New(env, "Clipboard text is only supported on Linux X11 sessions.").ThrowAsJavaScriptException();
+	return env.Null();
+	#endif
+}
+
+Napi::Value clearClipboardTextWrapper(const Napi::CallbackInfo& info)
+{
+	Napi::Env env = info.Env();
+
+	#if defined(USE_X11)
+	char *errorMessage = NULL;
+
+	if (!XClearClipboardText(&errorMessage))
+	{
+		const char *message = errorMessage != NULL ? errorMessage : "Could not clear clipboard text.";
+		Napi::Error::New(env, message).ThrowAsJavaScriptException();
+		if (errorMessage != NULL)
+		{
+			free(errorMessage);
+		}
+		return env.Null();
+	}
+
+	if (errorMessage != NULL)
+	{
+		free(errorMessage);
+	}
+
+	return Napi::Number::New(env, 1);
+	#else
+	Napi::Error::New(env, "Clipboard text is only supported on Linux X11 sessions.").ThrowAsJavaScriptException();
+	return env.Null();
+	#endif
+}
+
 Napi::Value getXDisplayNameWrapper(const Napi::CallbackInfo& info)
 {
 	Napi::Env env = info.Env();
@@ -1390,18 +1467,8 @@ Napi::Value captureScreenWrapper(const Napi::CallbackInfo& info)
 	}
 
 	MMBitmapRef bitmap = copyMMBitmapFromDisplayInRect(MMRectMake(x, y, w, h));
-
-	uint32_t bufferSize = bitmap->bytewidth * bitmap->height;
-	Napi::Object buffer = Napi::Buffer<char>::Copy(env, (char*)bitmap->imageBuffer, bufferSize);
-
-	Napi::Object obj = Napi::Object::New(env);
-	obj.Set("width", Napi::Number::New(env, bitmap->width));
-	obj.Set("height", Napi::Number::New(env, bitmap->height));
-	obj.Set("byteWidth", Napi::Number::New(env, bitmap->bytewidth));
-	obj.Set("bitsPerPixel", Napi::Number::New(env, bitmap->bitsPerPixel));
-	obj.Set("bytesPerPixel", Napi::Number::New(env, bitmap->bytesPerPixel));
-	obj.Set("image", buffer);
-
+	Napi::Object obj = BuildBitmapObject(env, bitmap);
+	destroyMMBitmap(bitmap);
 	return obj;
 }
 
@@ -1425,6 +1492,22 @@ class BMP
 		uint8_t *image;
 };
 
+static Napi::Object BuildBitmapObject(Napi::Env env, MMBitmapRef bitmap);
+
+static Napi::Object BuildBitmapObject(Napi::Env env, MMBitmapRef bitmap)
+{
+	const uint32_t bufferSize = bitmap->bytewidth * bitmap->height;
+	Napi::Object buffer = Napi::Buffer<char>::Copy(env, (char*)bitmap->imageBuffer, bufferSize);
+	Napi::Object obj = Napi::Object::New(env);
+	obj.Set("width", Napi::Number::New(env, bitmap->width));
+	obj.Set("height", Napi::Number::New(env, bitmap->height));
+	obj.Set("byteWidth", Napi::Number::New(env, bitmap->bytewidth));
+	obj.Set("bitsPerPixel", Napi::Number::New(env, bitmap->bitsPerPixel));
+	obj.Set("bytesPerPixel", Napi::Number::New(env, bitmap->bytesPerPixel));
+	obj.Set("image", buffer);
+	return obj;
+}
+
 //Convert object from Javascript to a C++ class (BMP).
 BMP buildBMP(Napi::Object obj)
 {
@@ -1444,6 +1527,210 @@ BMP buildBMP(Napi::Object obj)
 
 	return img;
  }
+
+static MMBitmapRef BuildMMBitmapFromJsObject(const Napi::Object& obj)
+{
+	BMP img = buildBMP(obj);
+	return createMMBitmap(img.image,
+	                      img.width,
+	                      img.height,
+	                      img.byteWidth,
+	                      img.bitsPerPixel,
+	                      img.bytesPerPixel);
+}
+
+static Napi::Object BuildSearchMatchObject(Napi::Env env,
+	                                      bool found,
+	                                      double score,
+	                                      size_t x,
+	                                      size_t y,
+	                                      size_t width,
+	                                      size_t height)
+{
+	Napi::Object result = Napi::Object::New(env);
+	result.Set("found", Napi::Boolean::New(env, found));
+	if (found)
+	{
+		Napi::Object location = Napi::Object::New(env);
+		Napi::Object size = Napi::Object::New(env);
+		location.Set("x", Napi::Number::New(env, x));
+		location.Set("y", Napi::Number::New(env, y));
+		size.Set("width", Napi::Number::New(env, width));
+		size.Set("height", Napi::Number::New(env, height));
+		result.Set("score", Napi::Number::New(env, score));
+		result.Set("location", location);
+		result.Set("size", size);
+	}
+	else
+	{
+		result.Set("score", env.Null());
+		result.Set("location", env.Null());
+		result.Set("size", env.Null());
+	}
+
+	return result;
+}
+
+static double ColorSimilarity(MMRGBColor first, MMRGBColor second)
+{
+	const double redDelta = static_cast<double>(first.red) - static_cast<double>(second.red);
+	const double greenDelta = static_cast<double>(first.green) - static_cast<double>(second.green);
+	const double blueDelta = static_cast<double>(first.blue) - static_cast<double>(second.blue);
+	const double distance = sqrt((redDelta * redDelta) + (greenDelta * greenDelta) + (blueDelta * blueDelta));
+	const double score = 1.0 - (distance / 441.67295593);
+
+	if (score < 0.0)
+	{
+		return 0.0;
+	}
+
+	if (score > 1.0)
+	{
+		return 1.0;
+	}
+
+	return score;
+}
+
+static MMRGBColor GetBitmapColorAt(MMBitmapRef image, size_t x, size_t y)
+{
+	return *(MMRGBColor *)(image->imageBuffer + ((image->bytewidth * y) + (x * image->bytesPerPixel)));
+}
+
+static size_t GetFuzzySampleStep(size_t width, size_t height, size_t explicitStep)
+{
+	if (explicitStep > 0)
+	{
+		return explicitStep;
+	}
+
+	const size_t area = width * height;
+	if (area >= 40000)
+	{
+		return 4;
+	}
+
+	if (area >= 10000)
+	{
+		return 3;
+	}
+
+	if (area >= 2500)
+	{
+		return 2;
+	}
+
+	return 1;
+}
+
+static Napi::Object FindBestFuzzyBitmapMatch(Napi::Env env,
+	                                        MMBitmapRef needle,
+	                                        MMBitmapRef haystack,
+	                                        double threshold,
+	                                        double tolerance,
+	                                        bool allowPartialMatch,
+	                                        double minimumOverlapRatio,
+	                                        size_t sampleStep)
+{
+	if (needle == NULL || haystack == NULL)
+	{
+		return BuildSearchMatchObject(env, false, 0.0, 0, 0, 0, 0);
+	}
+
+	if (needle->width == 0 || needle->height == 0 || haystack->width == 0 || haystack->height == 0)
+	{
+		return BuildSearchMatchObject(env, false, 0.0, 0, 0, 0, 0);
+	}
+
+	const int minX = allowPartialMatch ? -(static_cast<int>(needle->width) - 1) : 0;
+	const int minY = allowPartialMatch ? -(static_cast<int>(needle->height) - 1) : 0;
+	const int maxX = allowPartialMatch ? static_cast<int>(haystack->width) - 1 : static_cast<int>(haystack->width - needle->width);
+	const int maxY = allowPartialMatch ? static_cast<int>(haystack->height) - 1 : static_cast<int>(haystack->height - needle->height);
+	double bestScore = -1.0;
+	size_t bestX = 0;
+	size_t bestY = 0;
+
+	if (!allowPartialMatch && (needle->width > haystack->width || needle->height > haystack->height))
+	{
+		return BuildSearchMatchObject(env, false, 0.0, 0, 0, 0, 0);
+	}
+
+	for (int offsetY = minY; offsetY <= maxY; ++offsetY)
+	{
+		for (int offsetX = minX; offsetX <= maxX; ++offsetX)
+		{
+			int overlapLeft = offsetX < 0 ? -offsetX : 0;
+			int overlapTop = offsetY < 0 ? -offsetY : 0;
+			int overlapRight = static_cast<int>(needle->width);
+			int overlapBottom = static_cast<int>(needle->height);
+			double scoreTotal = 0.0;
+			size_t sampleCount = 0;
+
+			if (offsetX + overlapRight > static_cast<int>(haystack->width))
+			{
+				overlapRight = static_cast<int>(haystack->width) - offsetX;
+			}
+
+			if (offsetY + overlapBottom > static_cast<int>(haystack->height))
+			{
+				overlapBottom = static_cast<int>(haystack->height) - offsetY;
+			}
+
+			if (overlapLeft >= overlapRight || overlapTop >= overlapBottom)
+			{
+				continue;
+			}
+
+			const size_t overlapWidth = static_cast<size_t>(overlapRight - overlapLeft);
+			const size_t overlapHeight = static_cast<size_t>(overlapBottom - overlapTop);
+			const double overlapRatio = static_cast<double>(overlapWidth * overlapHeight) /
+				static_cast<double>(needle->width * needle->height);
+
+			if (overlapRatio < minimumOverlapRatio)
+			{
+				continue;
+			}
+
+			for (int needleY = overlapTop; needleY < overlapBottom; needleY += static_cast<int>(sampleStep))
+			{
+				for (int needleX = overlapLeft; needleX < overlapRight; needleX += static_cast<int>(sampleStep))
+				{
+					MMRGBColor needleColor = GetBitmapColorAt(needle, static_cast<size_t>(needleX), static_cast<size_t>(needleY));
+					MMRGBColor haystackColor = GetBitmapColorAt(haystack,
+					                                          static_cast<size_t>(offsetX + needleX),
+					                                          static_cast<size_t>(offsetY + needleY));
+					double similarity = ColorSimilarity(needleColor, haystackColor);
+					if (similarity < (1.0 - tolerance))
+					{
+						similarity = 0.0;
+					}
+					scoreTotal += similarity;
+					++sampleCount;
+				}
+			}
+
+			if (sampleCount == 0)
+			{
+				continue;
+			}
+
+			const double score = scoreTotal / static_cast<double>(sampleCount);
+			if (score > bestScore)
+			{
+				bestScore = score;
+				bestX = static_cast<size_t>(offsetX < 0 ? 0 : offsetX);
+				bestY = static_cast<size_t>(offsetY < 0 ? 0 : offsetY);
+			}
+		}
+	}
+
+	if (bestScore >= threshold)
+	{
+		return BuildSearchMatchObject(env, true, bestScore, bestX, bestY, needle->width, needle->height);
+	}
+
+	return BuildSearchMatchObject(env, false, bestScore, 0, 0, 0, 0);
+}
 
 Napi::Value getColorWrapper(const Napi::CallbackInfo& info)
 {
@@ -1477,6 +1764,155 @@ return env.Null();
 
 	return Napi::String::New(env, hex);
 
+}
+
+Napi::Value loadBitmapFromFileWrapper(const Napi::CallbackInfo& info)
+{
+	Napi::Env env = info.Env();
+
+	if (info.Length() != 1)
+	{
+		Napi::Error::New(env, "Invalid number of arguments.").ThrowAsJavaScriptException();
+		return env.Null();
+	}
+
+	std::string path = info[0].As<Napi::String>();
+	const char *extension = getExtension(path.c_str(), path.size());
+	const MMImageType imageType = extension != NULL ? imageTypeFromExtension(extension) : kInvalidImageType;
+	MMIOError errorCode = kMMIOUnsupportedTypeError;
+	MMBitmapRef bitmap = newMMBitmapFromFile(path.c_str(), imageType, &errorCode);
+
+	if (bitmap == NULL)
+	{
+		const char *message = MMIOErrorString(imageType, errorCode);
+		if (message == NULL)
+		{
+			message = "Could not load image reference from file.";
+		}
+		Napi::Error::New(env, message).ThrowAsJavaScriptException();
+		return env.Null();
+	}
+
+	Napi::Object result = BuildBitmapObject(env, bitmap);
+	destroyMMBitmap(bitmap);
+	return result;
+}
+
+Napi::Value findBitmapWrapper(const Napi::CallbackInfo& info)
+{
+	Napi::Env env = info.Env();
+
+	if (info.Length() < 2)
+	{
+		Napi::Error::New(env, "Invalid number of arguments.").ThrowAsJavaScriptException();
+		return env.Null();
+	}
+
+	MMBitmapRef haystack = BuildMMBitmapFromJsObject(info[0].ToObject());
+	MMBitmapRef needle = BuildMMBitmapFromJsObject(info[1].ToObject());
+	const float tolerance = info.Length() > 2 ? info[2].As<Napi::Number>().FloatValue() : 0.0f;
+	MMPoint point = MMPointZero;
+	Napi::Object result;
+
+	if (tolerance < 0.0f || tolerance > 1.0f)
+	{
+		destroyMMBitmap(haystack);
+		destroyMMBitmap(needle);
+		Napi::Error::New(env, "Bitmap search tolerance must be between 0 and 1.").ThrowAsJavaScriptException();
+		return env.Null();
+	}
+
+	const int searchResult = findBitmapInBitmap(needle, haystack, &point, tolerance);
+	result = BuildSearchMatchObject(env,
+	                               searchResult == 0,
+	                               searchResult == 0 ? 1.0 : 0.0,
+	                               point.x,
+	                               point.y,
+	                               needle->width,
+	                               needle->height);
+
+	destroyMMBitmap(haystack);
+	destroyMMBitmap(needle);
+	return result;
+}
+
+Napi::Value findAllBitmapsWrapper(const Napi::CallbackInfo& info)
+{
+	Napi::Env env = info.Env();
+
+	if (info.Length() < 2)
+	{
+		Napi::Error::New(env, "Invalid number of arguments.").ThrowAsJavaScriptException();
+		return env.Null();
+	}
+
+	MMBitmapRef haystack = BuildMMBitmapFromJsObject(info[0].ToObject());
+	MMBitmapRef needle = BuildMMBitmapFromJsObject(info[1].ToObject());
+	const float tolerance = info.Length() > 2 ? info[2].As<Napi::Number>().FloatValue() : 0.0f;
+
+	if (tolerance < 0.0f || tolerance > 1.0f)
+	{
+		destroyMMBitmap(haystack);
+		destroyMMBitmap(needle);
+		Napi::Error::New(env, "Bitmap search tolerance must be between 0 and 1.").ThrowAsJavaScriptException();
+		return env.Null();
+	}
+
+	MMPointArrayRef matches = findAllBitmapInBitmap(needle, haystack, tolerance);
+	Napi::Array result = Napi::Array::New(env, matches->count);
+
+	for (size_t index = 0; index < matches->count; ++index)
+	{
+		const MMPoint point = MMPointArrayGetItem(matches, index);
+		result.Set(index,
+		          BuildSearchMatchObject(env, true, 1.0, point.x, point.y, needle->width, needle->height));
+	}
+
+	destroyMMPointArray(matches);
+	destroyMMBitmap(haystack);
+	destroyMMBitmap(needle);
+	return result;
+}
+
+Napi::Value findFuzzyBitmapWrapper(const Napi::CallbackInfo& info)
+{
+	Napi::Env env = info.Env();
+
+	if (info.Length() < 2)
+	{
+		Napi::Error::New(env, "Invalid number of arguments.").ThrowAsJavaScriptException();
+		return env.Null();
+	}
+
+	MMBitmapRef haystack = BuildMMBitmapFromJsObject(info[0].ToObject());
+	MMBitmapRef needle = BuildMMBitmapFromJsObject(info[1].ToObject());
+	const double threshold = info.Length() > 2 ? info[2].As<Napi::Number>().DoubleValue() : 0.85;
+	const double tolerance = info.Length() > 3 ? info[3].As<Napi::Number>().DoubleValue() : 0.15;
+	const bool allowPartialMatch = info.Length() > 4 ? info[4].As<Napi::Boolean>().Value() : false;
+	const double minimumOverlapRatio = info.Length() > 5 ? info[5].As<Napi::Number>().DoubleValue() : 0.6;
+	const size_t sampleStep = info.Length() > 6 ? info[6].As<Napi::Number>().Uint32Value() : 0;
+
+	if (threshold < 0.0 || threshold > 1.0 || tolerance < 0.0 || tolerance > 1.0 ||
+	    minimumOverlapRatio < 0.0 || minimumOverlapRatio > 1.0)
+	{
+		destroyMMBitmap(haystack);
+		destroyMMBitmap(needle);
+		Napi::Error::New(env, "Invalid fuzzy bitmap search bounds specified.").ThrowAsJavaScriptException();
+		return env.Null();
+	}
+
+	Napi::Object result = FindBestFuzzyBitmapMatch(env,
+	                                             needle,
+	                                             haystack,
+	                                             threshold,
+	                                             tolerance,
+	                                             allowPartialMatch,
+	                                             minimumOverlapRatio,
+	                                             GetFuzzySampleStep(needle->width, needle->height, sampleStep));
+
+	destroyMMBitmap(haystack);
+	destroyMMBitmap(needle);
+	return result;
 }
 
 Napi::Object InitAll(Napi::Env env, Napi::Object exports)
@@ -1538,8 +1974,26 @@ Napi::Object InitAll(Napi::Env env, Napi::Object exports)
 	exports.Set(Napi::String::New(env, "focusWindow"),
 				Napi::Function::New(env, focusWindowWrapper));
 
+	exports.Set(Napi::String::New(env, "getClipboardText"),
+				Napi::Function::New(env, getClipboardTextWrapper));
+
+	exports.Set(Napi::String::New(env, "clearClipboardText"),
+				Napi::Function::New(env, clearClipboardTextWrapper));
+
 	exports.Set(Napi::String::New(env, "captureScreen"),
 				Napi::Function::New(env, captureScreenWrapper));
+
+	exports.Set(Napi::String::New(env, "loadBitmapFromFile"),
+				Napi::Function::New(env, loadBitmapFromFileWrapper));
+
+	exports.Set(Napi::String::New(env, "findBitmap"),
+				Napi::Function::New(env, findBitmapWrapper));
+
+	exports.Set(Napi::String::New(env, "findAllBitmaps"),
+				Napi::Function::New(env, findAllBitmapsWrapper));
+
+	exports.Set(Napi::String::New(env, "findFuzzyBitmap"),
+				Napi::Function::New(env, findFuzzyBitmapWrapper));
 
 	exports.Set(Napi::String::New(env, "getColor"),
 				Napi::Function::New(env, getColorWrapper));

@@ -2,6 +2,7 @@
 #ifndef XDISPLAY_H
 #define XDISPLAY_H
 
+#include <stdbool.h>
 #include <X11/Xlib.h>
 
 #ifdef __cplusplus
@@ -21,6 +22,8 @@ void XCloseMainDisplay(void);
 
 char *getXDisplay(void);
 void setXDisplay(const char *name);
+bool XGetClipboardText(char **text_out, char **error_message);
+bool XClearClipboardText(char **error_message);
 
 #ifdef __cplusplus
 }

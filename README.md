@@ -9,6 +9,8 @@ This fork is focused on:
 - typed APIs for mouse, keyboard, screen, displays, workspaces, and windows
 - deterministic or auto-randomized mouse paths
 - humanized cursor movement through geometry and speed variation
+- humanized typing rhythm and humanized double-click timing
+- scoped clipboard-copy helpers with callback context
 
 The currently validated path is X11-backed Linux. Wayland capability differences should be expected and checked at runtime through `robot.desktop.getCapabilities()`.
 
@@ -19,12 +21,14 @@ RobotTS expects a real graphical session for live input and capture work. If no 
 - Move, click, drag, scroll, and inspect the mouse cursor
 - Type text, tap keys, toggle keys, and send Unicode input
 - Capture the full screen, a display, or a window region
+- Search screen content with exact or fuzzy bitmap matching
 - Inspect displays, workspaces, windows, and the active window
 - Resolve, assert, and focus strict Linux window targets
 - Lock automation to one concrete window and use window-relative coordinates
 - Move the cursor with `linear`, `wavy`, and `human_like` paths
 - Use constant or humanized path speed profiles
 - Use static seeds for repeatability or omit seeds for auto-generated randomness
+- Use structured scoped-window errors instead of ambiguous generic failures
 
 ## What RobotTS Is
 
@@ -338,6 +342,20 @@ robot.typeStringDelayed("slow typing", 240);
 robot.unicodeTap(0x03A9);
 ```
 
+Humanized typing with seeded or auto-generated timing:
+
+```ts
+import robot from "robotts";
+
+const typing_result = robot.typeStringHumanized({
+  text: "humanized text output",
+  level: "medium",
+  include_effective_seed: true,
+});
+
+console.log(typing_result);
+```
+
 Guarded keyboard input against a target window:
 
 ```ts
@@ -356,6 +374,21 @@ robot.desktop.typeStringTarget({
 ```
 
 `keyTapTarget()` and `typeStringTarget()` focus and verify the target unless you explicitly set `require_active: false`.
+
+Humanized guarded typing against a verified window:
+
+```ts
+import robot from "robotts";
+
+const result = robot.desktop.typeStringTargetHumanized({
+  title_includes: "Terminal",
+  text: "humanized guarded text input",
+  level: "low",
+  include_effective_seed: true,
+});
+
+console.log(result);
+```
 
 ## Screen Capture And Pixel Access
 
@@ -410,6 +443,212 @@ const bitmap = robot.screen.captureWindow({
 
 console.log(bitmap.width, bitmap.height);
 ```
+
+## Image Search
+
+RobotTS exposes native-backed image search through `robot.image_search`. Reference images can come from either:
+
+- a RobotTS bitmap that already exists in memory
+- a PNG file path that is loaded once and reused
+
+Exact search from a bitmap reference:
+
+```ts
+import robot from "robotts";
+
+const haystack = robot.screen.capture();
+const reference = robot.screen.capture(100, 100, 64, 64);
+
+const result = robot.image_search.find({
+  source: {
+    type: "bitmap",
+    bitmap: haystack,
+  },
+  reference: {
+    bitmap: reference,
+  },
+  tolerance: 0,
+});
+
+if (result.found) {
+  console.log(result.location, result.size);
+}
+```
+
+Exact search from a PNG reference:
+
+```ts
+import robot from "robotts";
+
+const result = robot.image_search.find({
+  source: {
+    type: "screen",
+  },
+  reference: {
+    png_path: "./fixtures/button.png",
+  },
+  tolerance: 0.05,
+});
+
+if (result.found) {
+  console.log("found", result.global_location);
+}
+```
+
+Load and reuse a PNG reference across multiple searches:
+
+```ts
+import robot from "robotts";
+
+const reference_bitmap = robot.image_search.loadReference({
+  png_path: "./fixtures/icon.png",
+});
+
+const first = robot.image_search.find({
+  source: {
+    type: "screen",
+  },
+  reference: {
+    bitmap: reference_bitmap,
+  },
+});
+
+const second = robot.image_search.find({
+  source: {
+    type: "display",
+    display_id: 1,
+  },
+  reference: {
+    bitmap: reference_bitmap,
+  },
+});
+
+console.log({ first, second });
+```
+
+Get every exact match instead of only the first one:
+
+```ts
+import robot from "robotts";
+
+const matches = robot.image_search.findAll({
+  source: {
+    type: "screen",
+  },
+  reference: {
+    png_path: "./fixtures/repeated-icon.png",
+  },
+  max_results: 10,
+});
+
+for (const match of matches) {
+  console.log(match.location, match.score);
+}
+```
+
+Fuzzy search for near matches with palette or small rendering variance:
+
+```ts
+import robot from "robotts";
+
+const result = robot.image_search.findFuzzy({
+  source: {
+    type: "screen",
+  },
+  reference: {
+    png_path: "./fixtures/status-indicator.png",
+  },
+  threshold: 0.9,
+  tolerance: 0.15,
+  allow_partial_match: true,
+  minimum_overlap_ratio: 0.75,
+  sample_step: 2,
+});
+
+if (result.found) {
+  console.log("fuzzy match", {
+    score: result.score,
+    location: result.location,
+  });
+}
+```
+
+Search inside a strict target window:
+
+```ts
+import robot from "robotts";
+
+const result = robot.image_search.find({
+  source: {
+    type: "window",
+    title_includes: "Terminal",
+    require_active: true,
+  },
+  reference: {
+    png_path: "./fixtures/prompt.png",
+  },
+});
+
+console.log(result);
+```
+
+Search inside a locked window:
+
+```ts
+import robot from "robotts";
+
+const locked_window = robot.desktop.lockWindow({
+  title_includes: "Firefox",
+});
+
+const exact_match = locked_window.findImage({
+  reference: {
+    png_path: "./fixtures/toolbar-button.png",
+  },
+  x: 0,
+  y: 0,
+  width: 500,
+  height: 150,
+  require_active: true,
+});
+
+const fuzzy_match = locked_window.findImageFuzzy({
+  reference: {
+    png_path: "./fixtures/toolbar-button.png",
+  },
+  threshold: 0.92,
+  tolerance: 0.1,
+  allow_partial_match: true,
+  require_active: true,
+});
+
+console.log({ exact_match, fuzzy_match });
+```
+
+Handle the typed no-match result:
+
+```ts
+import robot from "robotts";
+
+const result = robot.image_search.find({
+  source: {
+    type: "screen",
+  },
+  reference: {
+    png_path: "./fixtures/does-not-exist-on-screen.png",
+  },
+});
+
+if (!result.found) {
+  console.log("no match", {
+    source_type: result.source_type,
+    reference_type: result.reference_type,
+    location: result.location,
+  });
+}
+```
+
+Scoped window searches still fail closed. If a targeted or locked window disappears, RobotTS throws a structured scoped-window error instead of silently searching some other window.
 
 ## Window Locks
 
@@ -510,6 +749,60 @@ locked_window.keyTap({
 locked_window.typeString({
   text: "typed into the locked window",
 });
+```
+
+Use humanized typing, clipboard copy, and humanized double-clicks in a locked window:
+
+```ts
+import robot from "robotts";
+
+const locked_window = robot.desktop.lockWindow({
+  title_includes: "Editor",
+});
+
+const typing_result = locked_window.typeStringHumanized({
+  text: "humanized locked-window text",
+  level: "medium",
+  include_effective_seed: true,
+});
+
+const copy_result = await locked_window.copySelection({
+  require_active: true,
+  timeout_ms: 2000,
+  poll_interval_ms: 75,
+});
+
+const double_click_result = locked_window.doubleClickHumanized({
+  x: 220,
+  y: 120,
+  level: "medium",
+  include_effective_seed: true,
+  require_active: true,
+});
+
+console.log({ typing_result, copy_result, double_click_result });
+```
+
+Use the callback form when you want to process the copied text immediately:
+
+```ts
+import robot from "robotts";
+
+const result = await robot.desktop.copySelectionFromTarget({
+  title_includes: "Editor",
+  timeout_ms: 2000,
+  poll_interval_ms: 75,
+  callback: async ({ data, context }) => {
+    return {
+      line_count: data.split("\n").length,
+      title: context.window.title,
+      backend: context.backend,
+      copy_method: context.copy_method,
+    };
+  },
+});
+
+console.log(result);
 ```
 
 ## Seeding And Repeatability
@@ -657,6 +950,25 @@ try {
 }
 ```
 
+Handle structured scoped-window failures:
+
+```ts
+import robot from "robotts";
+
+try {
+  robot.desktop.typeStringTargetHumanized({
+    title: "__definitely_not_a_real_window__",
+    text: "never sent",
+  });
+} catch (error) {
+  if (error instanceof robot.ScopedWindowError) {
+    console.error(error.code, error.details);
+  } else {
+    throw error;
+  }
+}
+```
+
 Handle unavailable strict verification:
 
 ```ts
@@ -681,7 +993,12 @@ if (!capabilities.supportsStrictTargetVerification) {
 - The validated desktop path today is X11. Backend capability differences should be checked at runtime through `robot.desktop.getCapabilities()`.
 - Window-relative coordinates use the outer window geometry, not a client-area-only coordinate system.
 - Locked-window APIs fail closed if the target window disappears or cannot be verified.
+- Scoped target failures throw `ScopedWindowError` with a stable `code` and optional `details`.
 - `mouseClickPath()` performs a real click after the path completes.
+- `typeStringHumanized()` varies per-character timing, but it does not currently simulate typo-and-correction behavior.
+- `doubleClickHumanized()` sends two real clicks with a humanized interval that stays within a conservative double-click range.
+- `copySelectionFromTarget()` and `locked_window.copySelection()` clear the clipboard first, then send `Ctrl+C`, then poll for plain-text clipboard data.
+- Clipboard-copy helpers fail closed with a timeout if the target app never publishes non-empty text to the clipboard after `Ctrl+C`.
 - `include_effective_seed` is optional. Omit it if you only care about movement behavior and not replay/debug logging.
 - `random_seed` supports two modes:
   - pass a static seed for repeatability
