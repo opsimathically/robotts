@@ -1,4 +1,7 @@
 #include <napi.h>
+#include <cstdlib>
+#include <cstring>
+#include <sstream>
 #include <vector>
 #include "mouse.h"
 #include "deadbeef_rand.h"
@@ -10,11 +13,380 @@
 #include "microsleep.h"
 #if defined(USE_X11)
 	#include "xdisplay.h"
+	#include <X11/Xatom.h>
+	#include <X11/Xutil.h>
+	#include <X11/extensions/Xrandr.h>
 #endif
 
 //Global delays.
 int mouseDelay = 10;
 int keyboardDelay = 10;
+
+#if defined(USE_X11)
+static Napi::Value NullableString(Napi::Env env, const std::string& value)
+{
+	if (value.empty())
+	{
+		return env.Null();
+	}
+
+	return Napi::String::New(env, value);
+}
+
+static Napi::Value NullableNumber(Napi::Env env, long value, bool hasValue)
+{
+	if (!hasValue)
+	{
+		return env.Null();
+	}
+
+	return Napi::Number::New(env, value);
+}
+
+static std::string WindowIdToString(Window window)
+{
+	std::ostringstream stream;
+	stream << static_cast<unsigned long>(window);
+	return stream.str();
+}
+
+static Atom GetOptionalAtom(Display *display, const char *name)
+{
+	return XInternAtom(display, name, True);
+}
+
+static bool GetPropertyData(Display *display,
+	                       Window window,
+	                       Atom property,
+	                       Atom requestedType,
+	                       unsigned char **data,
+	                       unsigned long *itemCount,
+	                       Atom *actualTypeOut = NULL,
+	                       int *actualFormatOut = NULL)
+{
+	if (!data || !itemCount || property == None)
+	{
+		return false;
+	}
+
+	Atom actualType;
+	int actualFormat;
+	unsigned long bytesAfter;
+	unsigned char *propertyValue = NULL;
+	const int status = XGetWindowProperty(display,
+	                                      window,
+	                                      property,
+	                                      0,
+	                                      (~0L),
+	                                      False,
+	                                      requestedType,
+	                                      &actualType,
+	                                      &actualFormat,
+	                                      itemCount,
+	                                      &bytesAfter,
+	                                      &propertyValue);
+
+	if (status != Success || propertyValue == NULL)
+	{
+		return false;
+	}
+
+	if (actualTypeOut != NULL)
+	{
+		*actualTypeOut = actualType;
+	}
+
+	if (actualFormatOut != NULL)
+	{
+		*actualFormatOut = actualFormat;
+	}
+
+	*data = propertyValue;
+	return true;
+}
+
+static bool GetCardinalProperty(Display *display, Window window, const char *propertyName, unsigned long *value)
+{
+	if (!value)
+	{
+		return false;
+	}
+
+	Atom property = GetOptionalAtom(display, propertyName);
+	unsigned char *data = NULL;
+	unsigned long itemCount = 0;
+	Atom actualType = None;
+	int actualFormat = 0;
+
+	if (!GetPropertyData(display, window, property, XA_CARDINAL, &data, &itemCount, &actualType, &actualFormat))
+	{
+		return false;
+	}
+
+	const bool hasValue = actualType == XA_CARDINAL && actualFormat == 32 && itemCount > 0;
+	if (hasValue)
+	{
+		*value = reinterpret_cast<unsigned long *>(data)[0];
+	}
+
+	XFree(data);
+	return hasValue;
+}
+
+static bool GetWindowProperty(Display *display, Window window, const char *propertyName, Window *value)
+{
+	if (!value)
+	{
+		return false;
+	}
+
+	Atom property = GetOptionalAtom(display, propertyName);
+	unsigned char *data = NULL;
+	unsigned long itemCount = 0;
+	Atom actualType = None;
+	int actualFormat = 0;
+
+	if (!GetPropertyData(display, window, property, XA_WINDOW, &data, &itemCount, &actualType, &actualFormat))
+	{
+		return false;
+	}
+
+	const bool hasValue = actualType == XA_WINDOW && actualFormat == 32 && itemCount > 0;
+	if (hasValue)
+	{
+		*value = reinterpret_cast<Window *>(data)[0];
+	}
+
+	XFree(data);
+	return hasValue;
+}
+
+static std::vector<Window> GetWindowListProperty(Display *display, Window window, const char *propertyName)
+{
+	std::vector<Window> windows;
+	Atom property = GetOptionalAtom(display, propertyName);
+	unsigned char *data = NULL;
+	unsigned long itemCount = 0;
+	Atom actualType = None;
+	int actualFormat = 0;
+
+	if (!GetPropertyData(display, window, property, XA_WINDOW, &data, &itemCount, &actualType, &actualFormat))
+	{
+		return windows;
+	}
+
+	if (actualType == XA_WINDOW && actualFormat == 32)
+	{
+		Window *windowItems = reinterpret_cast<Window *>(data);
+		for (unsigned long index = 0; index < itemCount; ++index)
+		{
+			windows.push_back(windowItems[index]);
+		}
+	}
+
+	XFree(data);
+	return windows;
+}
+
+static std::vector<std::string> GetNullSeparatedStrings(Display *display, Window window, const char *propertyName)
+{
+	std::vector<std::string> values;
+	Atom property = GetOptionalAtom(display, propertyName);
+	Atom utf8String = XInternAtom(display, "UTF8_STRING", False);
+	unsigned char *data = NULL;
+	unsigned long itemCount = 0;
+	Atom actualType = None;
+	int actualFormat = 0;
+
+	if (!GetPropertyData(display, window, property, utf8String, &data, &itemCount, &actualType, &actualFormat))
+	{
+		return values;
+	}
+
+	if (actualFormat == 8 && itemCount > 0)
+	{
+		std::string current;
+		for (unsigned long index = 0; index < itemCount; ++index)
+		{
+			const char value = reinterpret_cast<char *>(data)[index];
+			if (value == '\0')
+			{
+				values.push_back(current);
+				current.clear();
+			}
+			else
+			{
+				current.push_back(value);
+			}
+		}
+
+		if (!current.empty())
+		{
+			values.push_back(current);
+		}
+	}
+
+	XFree(data);
+	return values;
+}
+
+static std::string GetStringProperty(Display *display, Window window, const char *propertyName)
+{
+	Atom property = GetOptionalAtom(display, propertyName);
+	if (property != None)
+	{
+		Atom utf8String = XInternAtom(display, "UTF8_STRING", False);
+		unsigned char *data = NULL;
+		unsigned long itemCount = 0;
+		Atom actualType = None;
+		int actualFormat = 0;
+
+		if (GetPropertyData(display, window, property, utf8String, &data, &itemCount, &actualType, &actualFormat))
+		{
+			std::string value;
+			if (actualFormat == 8)
+			{
+				value.assign(reinterpret_cast<char *>(data), itemCount);
+			}
+
+			XFree(data);
+			if (!value.empty())
+			{
+				return value;
+			}
+		}
+
+		if (GetPropertyData(display, window, property, XA_STRING, &data, &itemCount, &actualType, &actualFormat))
+		{
+			std::string value;
+			if (actualFormat == 8)
+			{
+				value.assign(reinterpret_cast<char *>(data), itemCount);
+			}
+
+			XFree(data);
+			if (!value.empty())
+			{
+				return value;
+			}
+		}
+	}
+
+	if (strcmp(propertyName, "_NET_WM_NAME") == 0)
+	{
+		char *windowName = NULL;
+		if (XFetchName(display, window, &windowName) > 0 && windowName != NULL)
+		{
+			std::string value(windowName);
+			XFree(windowName);
+			return value;
+		}
+	}
+
+	return "";
+}
+
+static void GetWindowClassHint(Display *display,
+	                          Window window,
+	                          std::string *instanceName,
+	                          std::string *className)
+{
+	XClassHint classHint;
+	if (!XGetClassHint(display, window, &classHint))
+	{
+		return;
+	}
+
+	if (instanceName != NULL && classHint.res_name != NULL)
+	{
+		*instanceName = classHint.res_name;
+	}
+
+	if (className != NULL && classHint.res_class != NULL)
+	{
+		*className = classHint.res_class;
+	}
+
+	if (classHint.res_name != NULL)
+	{
+		XFree(classHint.res_name);
+	}
+
+	if (classHint.res_class != NULL)
+	{
+		XFree(classHint.res_class);
+	}
+}
+
+static Napi::Object BuildGeometryObject(Napi::Env env, int x, int y, unsigned int width, unsigned int height)
+{
+	Napi::Object geometry = Napi::Object::New(env);
+	geometry.Set("x", Napi::Number::New(env, x));
+	geometry.Set("y", Napi::Number::New(env, y));
+	geometry.Set("width", Napi::Number::New(env, width));
+	geometry.Set("height", Napi::Number::New(env, height));
+	return geometry;
+}
+
+static Napi::Object BuildWindowObject(Napi::Env env, Display *display, Window window, Window activeWindow)
+{
+	Napi::Object result = Napi::Object::New(env);
+	result.Set("windowId", Napi::String::New(env, WindowIdToString(window)));
+
+	std::string title = GetStringProperty(display, window, "_NET_WM_NAME");
+	std::string instanceName;
+	std::string className;
+	GetWindowClassHint(display, window, &instanceName, &className);
+
+	unsigned long pid = 0;
+	unsigned long workspaceId = 0;
+	const bool hasPid = GetCardinalProperty(display, window, "_NET_WM_PID", &pid);
+	const bool hasWorkspaceId = GetCardinalProperty(display, window, "_NET_WM_DESKTOP", &workspaceId);
+
+	XWindowAttributes attributes;
+	const bool hasAttributes = XGetWindowAttributes(display, window, &attributes) != 0;
+	int absoluteX = 0;
+	int absoluteY = 0;
+	Window child;
+	if (hasAttributes)
+	{
+		XTranslateCoordinates(display,
+		                      window,
+		                      DefaultRootWindow(display),
+		                      0,
+		                      0,
+		                      &absoluteX,
+		                      &absoluteY,
+		                      &child);
+	}
+
+	result.Set("title", NullableString(env, title));
+	result.Set("className", NullableString(env, className));
+	result.Set("instanceName", NullableString(env, instanceName));
+	result.Set("pid", NullableNumber(env, static_cast<long>(pid), hasPid));
+	result.Set("workspaceId", NullableNumber(env, static_cast<long>(workspaceId), hasWorkspaceId));
+	result.Set("isActive", Napi::Boolean::New(env, window == activeWindow));
+	result.Set("isVisible", Napi::Boolean::New(env, hasAttributes && attributes.map_state == IsViewable));
+	result.Set("geometry", BuildGeometryObject(env,
+	                                           absoluteX,
+	                                           absoluteY,
+	                                           hasAttributes ? static_cast<unsigned int>(attributes.width) : 0,
+	                                           hasAttributes ? static_cast<unsigned int>(attributes.height) : 0));
+
+	return result;
+}
+
+static Window ParseWindowId(const Napi::Value& value)
+{
+	if (value.IsString())
+	{
+		std::string windowId = value.As<Napi::String>().Utf8Value();
+		return static_cast<Window>(strtoul(windowId.c_str(), NULL, 0));
+	}
+
+	return static_cast<Window>(value.As<Napi::Number>().Uint32Value());
+}
+#endif
 
 /*
  __  __
@@ -565,7 +937,7 @@ Napi::Value keyToggleWrapper(const Napi::CallbackInfo& info)
 	MMKeyFlags flags = MOD_NONE;
 	MMKeyCode key;
 
-	bool down;
+	bool down = false;
 	const char *k;
 
 	//Get arguments from JavaScript.
@@ -783,6 +1155,182 @@ Napi::Value getScreenSizeWrapper(const Napi::CallbackInfo& info)
 	return obj;
 }
 
+Napi::Value getDesktopStateWrapper(const Napi::CallbackInfo& info)
+{
+	Napi::Env env = info.Env();
+	Napi::Object state = Napi::Object::New(env);
+	Napi::Object session = Napi::Object::New(env);
+	Napi::Object capabilities = Napi::Object::New(env);
+	Napi::Array displays = Napi::Array::New(env);
+	Napi::Array workspaces = Napi::Array::New(env);
+	Napi::Array windows = Napi::Array::New(env);
+
+	const char *sessionTypeEnv = getenv("XDG_SESSION_TYPE");
+	const char *waylandDisplayEnv = getenv("WAYLAND_DISPLAY");
+	const std::string sessionType = sessionTypeEnv != NULL ? sessionTypeEnv : "unknown";
+	const std::string waylandDisplayName = waylandDisplayEnv != NULL ? waylandDisplayEnv : "";
+
+	session.Set("sessionType", Napi::String::New(env, sessionType));
+	session.Set("xDisplayName", Napi::String::New(env, getXDisplay()));
+	session.Set("waylandDisplayName", NullableString(env, waylandDisplayName));
+
+	Display *display = XGetMainDisplay();
+	const bool hasDisplay = display != NULL;
+	const bool x11Session = sessionType == "x11" || sessionType.empty() || sessionType == "unknown";
+	const bool strictTargetingSupported = hasDisplay && x11Session;
+
+	capabilities.Set("backend", Napi::String::New(env, hasDisplay ? "x11" : "unavailable"));
+	capabilities.Set("supportsGlobalInputInjection", Napi::Boolean::New(env, strictTargetingSupported));
+	capabilities.Set("supportsWindowDiscovery", Napi::Boolean::New(env, hasDisplay));
+	capabilities.Set("supportsMonitorGeometry", Napi::Boolean::New(env, hasDisplay));
+	capabilities.Set("supportsWorkspaceIdentity", Napi::Boolean::New(env, hasDisplay));
+	capabilities.Set("supportsFocusChanges", Napi::Boolean::New(env, strictTargetingSupported));
+	capabilities.Set("supportsStrictTargetVerification", Napi::Boolean::New(env, strictTargetingSupported));
+
+	state.Set("session", session);
+	state.Set("capabilities", capabilities);
+	state.Set("displays", displays);
+	state.Set("workspaces", workspaces);
+	state.Set("windows", windows);
+	state.Set("activeWindow", env.Null());
+	state.Set("currentWorkspaceId", env.Null());
+	state.Set("desktopBounds", BuildGeometryObject(env, 0, 0, 0, 0));
+
+	if (!hasDisplay)
+	{
+		return state;
+	}
+
+	Window rootWindow = DefaultRootWindow(display);
+	XWindowAttributes rootAttributes;
+	XGetWindowAttributes(display, rootWindow, &rootAttributes);
+	state.Set("desktopBounds",
+	          BuildGeometryObject(env,
+	                              0,
+	                              0,
+	                              static_cast<unsigned int>(rootAttributes.width),
+	                              static_cast<unsigned int>(rootAttributes.height)));
+
+	int monitorCount = 0;
+	XRRMonitorInfo *monitorInfo = XRRGetMonitors(display, rootWindow, True, &monitorCount);
+	if (monitorInfo != NULL && monitorCount > 0)
+	{
+		for (int index = 0; index < monitorCount; ++index)
+		{
+			Napi::Object displayItem = Napi::Object::New(env);
+			std::string monitorName;
+			if (monitorInfo[index].name != None)
+			{
+				char *atomName = XGetAtomName(display, monitorInfo[index].name);
+				if (atomName != NULL)
+				{
+					monitorName = atomName;
+					XFree(atomName);
+				}
+			}
+			displayItem.Set("id", Napi::Number::New(env, index));
+			displayItem.Set("name", NullableString(env, monitorName));
+			displayItem.Set("x", Napi::Number::New(env, monitorInfo[index].x));
+			displayItem.Set("y", Napi::Number::New(env, monitorInfo[index].y));
+			displayItem.Set("width", Napi::Number::New(env, monitorInfo[index].width));
+			displayItem.Set("height", Napi::Number::New(env, monitorInfo[index].height));
+			displayItem.Set("isPrimary", Napi::Boolean::New(env, monitorInfo[index].primary));
+			displays.Set(index, displayItem);
+		}
+
+		XRRFreeMonitors(monitorInfo);
+	}
+	else
+	{
+		Napi::Object displayItem = Napi::Object::New(env);
+		displayItem.Set("id", Napi::Number::New(env, 0));
+		displayItem.Set("name", NullableString(env, "root"));
+		displayItem.Set("x", Napi::Number::New(env, 0));
+		displayItem.Set("y", Napi::Number::New(env, 0));
+		displayItem.Set("width", Napi::Number::New(env, rootAttributes.width));
+		displayItem.Set("height", Napi::Number::New(env, rootAttributes.height));
+		displayItem.Set("isPrimary", Napi::Boolean::New(env, true));
+		displays.Set(uint32_t(0), displayItem);
+	}
+
+	unsigned long numberOfDesktops = 0;
+	unsigned long currentDesktop = 0;
+	const bool hasNumberOfDesktops = GetCardinalProperty(display, rootWindow, "_NET_NUMBER_OF_DESKTOPS", &numberOfDesktops);
+	const bool hasCurrentDesktop = GetCardinalProperty(display, rootWindow, "_NET_CURRENT_DESKTOP", &currentDesktop);
+	const std::vector<std::string> desktopNames = GetNullSeparatedStrings(display, rootWindow, "_NET_DESKTOP_NAMES");
+
+	if (hasCurrentDesktop)
+	{
+		state.Set("currentWorkspaceId", Napi::Number::New(env, currentDesktop));
+	}
+
+	if (hasNumberOfDesktops)
+	{
+		for (unsigned long index = 0; index < numberOfDesktops; ++index)
+		{
+			Napi::Object workspace = Napi::Object::New(env);
+			workspace.Set("id", Napi::Number::New(env, index));
+			workspace.Set("name", NullableString(env, index < desktopNames.size() ? desktopNames[index] : ""));
+			workspace.Set("isCurrent", Napi::Boolean::New(env, hasCurrentDesktop && currentDesktop == index));
+			workspaces.Set(index, workspace);
+		}
+	}
+
+	Window activeWindow = None;
+	if (GetWindowProperty(display, rootWindow, "_NET_ACTIVE_WINDOW", &activeWindow))
+	{
+		state.Set("activeWindow", BuildWindowObject(env, display, activeWindow, activeWindow));
+	}
+
+	const std::vector<Window> clientWindows = GetWindowListProperty(display, rootWindow, "_NET_CLIENT_LIST");
+	for (size_t index = 0; index < clientWindows.size(); ++index)
+	{
+		windows.Set(index, BuildWindowObject(env, display, clientWindows[index], activeWindow));
+	}
+
+	return state;
+}
+
+Napi::Value focusWindowWrapper(const Napi::CallbackInfo& info)
+{
+	Napi::Env env = info.Env();
+
+	if (info.Length() != 1)
+	{
+		Napi::Error::New(env, "Invalid number of arguments.").ThrowAsJavaScriptException();
+return env.Null();
+	}
+
+	Display *display = XGetMainDisplay();
+	if (display == NULL)
+	{
+		Napi::Error::New(env, "Could not open X11 display for focus request.").ThrowAsJavaScriptException();
+return env.Null();
+	}
+
+	Window window = ParseWindowId(info[0]);
+	Window rootWindow = DefaultRootWindow(display);
+	Atom activeWindowAtom = XInternAtom(display, "_NET_ACTIVE_WINDOW", False);
+	XEvent event;
+	memset(&event, 0, sizeof(event));
+	event.xclient.type = ClientMessage;
+	event.xclient.message_type = activeWindowAtom;
+	event.xclient.display = display;
+	event.xclient.window = window;
+	event.xclient.format = 32;
+	event.xclient.data.l[0] = 1;
+	event.xclient.data.l[1] = CurrentTime;
+
+	XSendEvent(display,
+	           rootWindow,
+	           False,
+	           SubstructureRedirectMask | SubstructureNotifyMask,
+	           &event);
+	XFlush(display);
+
+	return Napi::Number::New(env, 1);
+}
+
 Napi::Value getXDisplayNameWrapper(const Napi::CallbackInfo& info)
 {
 	Napi::Env env = info.Env();
@@ -983,6 +1531,12 @@ Napi::Object InitAll(Napi::Env env, Napi::Object exports)
 
 	exports.Set(Napi::String::New(env, "getScreenSize"),
 				Napi::Function::New(env, getScreenSizeWrapper));
+
+	exports.Set(Napi::String::New(env, "getDesktopState"),
+				Napi::Function::New(env, getDesktopStateWrapper));
+
+	exports.Set(Napi::String::New(env, "focusWindow"),
+				Napi::Function::New(env, focusWindowWrapper));
 
 	exports.Set(Napi::String::New(env, "captureScreen"),
 				Napi::Function::New(env, captureScreenWrapper));

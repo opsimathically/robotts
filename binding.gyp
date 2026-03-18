@@ -39,6 +39,7 @@
             '-lpng',
             '-lz',
             '-lX11',
+            '-lXrandr',
             '-lXtst'
           ]
         },

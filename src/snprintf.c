@@ -554,14 +554,13 @@ int portable_vsnprintf(char *str, size_t str_m, const char *fmt, va_list ap) {
    /* but the following code achieves better performance for cases
     * where format string is long and contains few conversions */
       const char *q = strchr(p+1,'%');
-      size_t n = !q ? strlen(p) : (q-p);
+      size_t n = !q ? strlen(p) : (size_t)(q-p);
       if (str_l < str_m) {
         size_t avail = str_m-str_l;
         fast_memcpy(str+str_l, p, (n>avail?avail:n));
       }
       p += n; str_l += n;
     } else {
-      const char *starting_p;
       size_t min_field_width = 0, precision = 0;
       int zero_padding = 0, precision_specified = 0, justify_left = 0;
       int alternate_form = 0, force_sign = 0;
@@ -570,7 +569,7 @@ int portable_vsnprintf(char *str, size_t str_m, const char *fmt, va_list ap) {
       char length_modifier = '\0';            /* allowed values: \0, h, l, L */
       char tmp[32];/* temporary buffer for simple numeric->string conversion */
 
-      const char *str_arg;      /* string address in case of string argument */
+      const char *str_arg = NULL; /* string address in case of string argument */
       size_t str_arg_l;         /* natural field width of arg without padding
                                    and sign */
       unsigned char uchar_arg;
@@ -588,7 +587,10 @@ int portable_vsnprintf(char *str, size_t str_m, const char *fmt, va_list ap) {
       char fmt_spec = '\0';
         /* current conversion specifier character */
 
-      starting_p = p; p++;  /* skip '%' */
+  #if defined(PERL_COMPATIBLE) || defined(LINUX_COMPATIBLE)
+      const char *starting_p = p;
+  #endif
+      p++;  /* skip '%' */
    /* parse flags */
       while (*p == '0' || *p == '-' || *p == '+' ||
              *p == ' ' || *p == '#' || *p == '\'') {
@@ -701,7 +703,7 @@ int portable_vsnprintf(char *str, size_t str_m, const char *fmt, va_list ap) {
        /* memchr on HP does not like n > 2^31  !!! */
             const char *q = memchr(str_arg, '\0',
                              precision <= 0x7fffffff ? precision : 0x7fffffff);
-            str_arg_l = !q ? precision : (q-str_arg);
+            str_arg_l = !q ? precision : (size_t)(q-str_arg);
           }
           break;
         default: break;
@@ -908,8 +910,10 @@ int portable_vsnprintf(char *str, size_t str_m, const char *fmt, va_list ap) {
         }
      /* zero padding to specified minimal field width? */
         if (!justify_left && zero_padding) {
-          int n = min_field_width - (str_arg_l+number_of_zeros_to_pad);
-          if (n > 0) number_of_zeros_to_pad += n;
+          size_t content_width = str_arg_l + number_of_zeros_to_pad;
+          if (min_field_width > content_width) {
+            number_of_zeros_to_pad += min_field_width - content_width;
+          }
         }
         break;
       }
@@ -936,8 +940,9 @@ int portable_vsnprintf(char *str, size_t str_m, const char *fmt, va_list ap) {
    /* insert padding to the left as requested by min_field_width;
       this does not include the zero padding in case of numerical conversions*/
       if (!justify_left) {                /* left padding with blank or zero */
-        int n = min_field_width - (str_arg_l+number_of_zeros_to_pad);
-        if (n > 0) {
+        size_t content_width = str_arg_l + number_of_zeros_to_pad;
+        if (min_field_width > content_width) {
+          size_t n = min_field_width - content_width;
           if (str_l < str_m) {
             size_t avail = str_m-str_l;
             fast_memset(str+str_l, (zero_padding?'0':' '), (n>avail?avail:n));
@@ -947,13 +952,13 @@ int portable_vsnprintf(char *str, size_t str_m, const char *fmt, va_list ap) {
       }
    /* zero padding as requested by the precision or by the minimal field width
     * for numeric conversions required? */
-      if (number_of_zeros_to_pad <= 0) {
+      if (number_of_zeros_to_pad == 0) {
      /* will not copy first part of numeric right now, *
       * force it to be copied later in its entirety    */
         zero_padding_insertion_ind = 0;
       } else {
      /* insert first part of numerics (sign or '0x') before zero padding */
-        int n = zero_padding_insertion_ind;
+        size_t n = zero_padding_insertion_ind;
         if (n > 0) {
           if (str_l < str_m) {
             size_t avail = str_m-str_l;
@@ -973,7 +978,8 @@ int portable_vsnprintf(char *str, size_t str_m, const char *fmt, va_list ap) {
       }
    /* insert formatted string
     * (or as-is conversion specifier for unknown conversions) */
-      { int n = str_arg_l - zero_padding_insertion_ind;
+      if (str_arg_l > zero_padding_insertion_ind) {
+        size_t n = str_arg_l - zero_padding_insertion_ind;
         if (n > 0) {
           if (str_l < str_m) {
             size_t avail = str_m-str_l;
@@ -985,8 +991,9 @@ int portable_vsnprintf(char *str, size_t str_m, const char *fmt, va_list ap) {
       }
    /* insert right padding */
       if (justify_left) {          /* right blank padding to the field width */
-        int n = min_field_width - (str_arg_l+number_of_zeros_to_pad);
-        if (n > 0) {
+        size_t content_width = str_arg_l + number_of_zeros_to_pad;
+        if (min_field_width > content_width) {
+          size_t n = min_field_width - content_width;
           if (str_l < str_m) {
             size_t avail = str_m-str_l;
             fast_memset(str+str_l, ' ', (n>avail?avail:n));

@@ -1,22 +1,29 @@
 {
-  "name": "robotjs",
+  "name": "robotts",
   "version": "0.7.0",
-  "description": "Node.js Desktop Automation.",
-  "main": "index.js",
-  "typings": "index.d.ts",
+  "description": "Linux desktop automation and targeting for Node.js and TypeScript.",
+  "main": "./index.js",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.js",
+      "default": "./index.mjs"
+    }
+  },
   "scripts": {
-    "test": "run-script-os",
-    "test:darwin:linux": "jasmine test/**/*.js",
+    "test": "jasmine test/**/*.js",
     "test-keyboard": "node test/keyboard.js",
-    "test:win32": "jasmine test/**/*.js",
-    "install": "prebuild-install --runtime napi || node-gyp rebuild",
-    "install-debug": "prebuild-install --runtime napi || node-gyp rebuild --debug",
-    "prebuild": "prebuild --all --runtime napi",
-    "build": "node-gyp rebuild"
+    "install": "node-gyp rebuild",
+    "install-debug": "node-gyp rebuild --debug",
+    "build": "node-gyp rebuild",
+    "rebuild": "node-gyp rebuild"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/octalmage/robotjs.git"
+    "url": "https://github.com/opsimathically/robotts.git"
   },
   "keywords": [
     "Automation",
@@ -27,7 +34,7 @@
     "image",
     "pixel",
     "desktop",
-    "robotjs",
+    "robotts",
     "screen",
     "recognition",
     "autohotkey",
@@ -38,24 +45,24 @@
   "author": "Jason Stallings",
   "license": "MIT",
   "gypfile": true,
+  "engines": {
+    "node": ">=22"
+  },
   "binary": {
     "napi_versions": [
       3
     ]
   },
   "bugs": {
-    "url": "https://github.com/octalmage/robotjs/issues"
+    "url": "https://github.com/opsimathically/robotts/issues"
   },
-  "homepage": "https://github.com/octalmage/robotjs",
+  "homepage": "https://github.com/opsimathically/robotts",
   "dependencies": {
-    "node-addon-api": "^4.2.0",
-    "prebuild-install": "^5.3.3"
+    "node-addon-api": "^4.2.0"
   },
   "devDependencies": {
     "jasmine": "^2.99.0",
     "node-gyp": "^12.2.0",
-    "prebuild": "^13",
-    "run-script-os": "^1.0.3",
     "tape": "^4.8.0"
   }
 }
