@@ -73,6 +73,16 @@ sudo apt install -y \
 
 ## Install And Build On Linux
 
+Recommended first-run bootstrap from a fresh checkout:
+
+```bash
+./build.sh
+```
+
+The bootstrap script checks that you are on Linux, verifies the required toolchain and native development libraries, sets `npm_config_devdir` automatically, installs Node dependencies with scripts disabled when needed, and then builds the native addon.
+
+If you prefer the low-level manual flow, use the explicit steps below.
+
 Install dependencies without triggering the native build immediately:
 
 ```bash
@@ -1092,6 +1102,12 @@ if (!capabilities.supportsStrictTargetVerification) {
 Basic build flow:
 
 ```bash
+./build.sh
+```
+
+Low-level equivalent:
+
+```bash
 npm install --ignore-scripts
 npm_config_devdir=/tmp/node-gyp-cache npm run build
 ```
@@ -1120,6 +1136,9 @@ Troubleshooting:
 - native build failures
   - verify Linux system packages are installed
   - verify Node 22+ and the explicit build flow above
+  - `./build.sh` checks build prerequisites and sets `npm_config_devdir` automatically
+- desktop runtime failures after a successful build
+  - `DISPLAY` and `XAUTHORITY` affect runtime desktop automation, not native compilation
 
 ## Personal Use Disclaimer
 

@@ -16,6 +16,7 @@
   "scripts": {
     "test": "jasmine test/**/*.js",
     "test-keyboard": "node test/keyboard.js",
+    "build:bootstrap": "bash ./build.sh",
     "install": "node-gyp rebuild",
     "install-debug": "node-gyp rebuild --debug",
     "build": "node-gyp rebuild",
