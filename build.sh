@@ -211,6 +211,14 @@ VerifyBuildOutput()
 	PrintInfo "Addon output verified at ${addon_output_path}"
 }
 
+RunSafeVerification()
+{
+	(
+		cd "${repo_root}"
+		npm run verify:build
+	)
+}
+
 main()
 {
 	RequireRepoRoot
@@ -239,8 +247,17 @@ main()
 	PrintStep "Verifying addon"
 	VerifyBuildOutput
 
+	PrintStep "Running safe post-build verification"
+	if ! RunSafeVerification
+	then
+		Fail "Safe post-build verification failed. Fix the reported issues before relying on this build."
+	fi
+
 	PrintStep "Build complete"
 	PrintInfo "RobotTS is ready to use."
+	PrintInfo "Build status: pass"
+	PrintInfo "Safe verification: pass"
+	PrintInfo "Live verification: not run"
 	PrintInfo "Addon path: ${addon_output_path}"
 }
 

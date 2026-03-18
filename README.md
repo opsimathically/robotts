@@ -79,7 +79,17 @@ Recommended first-run bootstrap from a fresh checkout:
 ./build.sh
 ```
 
-The bootstrap script checks that you are on Linux, verifies the required toolchain and native development libraries, sets `npm_config_devdir` automatically, installs Node dependencies with scripts disabled when needed, and then builds the native addon.
+The bootstrap script checks that you are on Linux, verifies the required toolchain and native development libraries, sets `npm_config_devdir` automatically, installs Node dependencies with scripts disabled when needed, builds the native addon, and then runs safe post-build verification.
+
+Available verification commands:
+
+```bash
+npm run verify:build
+npm run verify:live
+npm run verify:all
+```
+
+`verify:build` is non-invasive and is already run by `./build.sh`. `verify:live` is opt-in, opens a local verification harness window, moves the mouse, clicks, and types text to prove live input injection is working. The live verifier needs a real Linux GUI session and Python Tk support such as `python3-tk`.
 
 If you prefer the low-level manual flow, use the explicit steps below.
 
@@ -1110,6 +1120,7 @@ Low-level equivalent:
 ```bash
 npm install --ignore-scripts
 npm_config_devdir=/tmp/node-gyp-cache npm run build
+npm run verify:build
 ```
 
 Useful checks:
@@ -1117,6 +1128,7 @@ Useful checks:
 ```bash
 node -c index.js
 npm test
+npm run verify:build
 ```
 
 Native validation expectations for this fork:
@@ -1139,6 +1151,10 @@ Troubleshooting:
   - `./build.sh` checks build prerequisites and sets `npm_config_devdir` automatically
 - desktop runtime failures after a successful build
   - `DISPLAY` and `XAUTHORITY` affect runtime desktop automation, not native compilation
+- live verification failures
+  - `npm run verify:live` requires a real graphical Linux session
+  - verify Python Tk support is installed, for example with `python3-tk`
+  - the live verifier intentionally moves the mouse and types into its own harness window
 
 ## Personal Use Disclaimer
 
