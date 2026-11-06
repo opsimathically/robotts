@@ -1,0 +1,103 @@
+{
+  "name": "@opsimathically/robotts",
+  "version": "0.0.6",
+  "description": "Linux X11 desktop automation, global hotkeys, window targeting, screen capture, and image matching for Node.js and TypeScript.",
+  "type": "commonjs",
+  "main": "./index.js",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "files": [
+    "CHANGELOG.md",
+    "docs/fuzzy_matching_performance.md",
+    "LICENSE.md",
+    "README.md",
+    "binding.gyp",
+    "index.d.ts",
+    "index.js",
+    "index.mjs",
+    "lib/",
+    "src/"
+  ],
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.mjs",
+      "require": "./index.js",
+      "default": "./index.mjs"
+    }
+  },
+  "scripts": {
+    "test": "npm run test:unit && npm run test:types && npm run verify:build",
+    "test:unit": "jasmine --random=false test/package-surface.js test/system-utilities.js test/hotkey-manager.js test/held-key-manager.js test/locked-window.js test/image-search.js test/image-move.js test/image-catalog-watcher.js",
+    "test:types": "tsc -p tsconfig.types.json",
+    "test:desktop": "jasmine --random=false test/bitmap.js test/screen.js",
+    "test:live": "npm run verify:live",
+    "test:all": "npm run test && npm run test:desktop && npm run test:live",
+    "verify:build": "node ./scripts/verify-build.js",
+    "verify:live": "node ./scripts/verify-live.js",
+    "verify:all": "npm run verify:build && npm run verify:live",
+    "benchmark:image-catalog": "node ./scripts/benchmark-image-catalog.js",
+    "benchmark:fuzzy-catalog": "node ./scripts/benchmark-fuzzy-catalog.js",
+    "benchmark:fuzzy-direct": "node ./scripts/benchmark-fuzzy-direct.js",
+    "verify:image-catalog-native": "node --expose-gc ./scripts/verify-image-catalog-native.js",
+    "verify:screen-capture-native": "node --expose-gc ./scripts/verify-screen-capture-native.js",
+    "verify:hotkey-native": "node --expose-gc ./scripts/verify-hotkey-native.js",
+    "prepublishOnly": "npm run build && npm run test:unit && npm run test:types",
+    "install": "node-gyp rebuild",
+    "install-debug": "node-gyp rebuild --debug",
+    "build": "node-gyp rebuild",
+    "rebuild": "node-gyp rebuild"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/opsimathically/robotts.git"
+  },
+  "keywords": [
+    "automation",
+    "desktop",
+    "gui",
+    "global-hotkey",
+    "hotkey",
+    "image-matching",
+    "linux",
+    "mouse",
+    "keyboard",
+    "native-addon",
+    "screenshot",
+    "pixel",
+    "robotts",
+    "screen",
+    "recognition",
+    "typescript",
+    "x11",
+    "color"
+  ],
+  "author": {
+    "name": "Jason Stallings",
+    "url": "https://github.com/opsimathically"
+  },
+  "license": "MIT",
+  "gypfile": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "os": [
+    "linux"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "bugs": {
+    "url": "https://github.com/opsimathically/robotts/issues"
+  },
+  "homepage": "https://github.com/opsimathically/robotts#readme",
+  "dependencies": {
+    "node-addon-api": "^8.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "jasmine": "^6.3.0",
+    "node-gyp": "^12.4.0",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,14 @@
+build/
+node_modules/
+prebuilds/
+__pycache__/
+*.py[cod]
+/.idea
+
+# Local configuration and generated diagnostics
+.env
+.env.*
+!.env.example
+.local/
+artifacts/
+*.log

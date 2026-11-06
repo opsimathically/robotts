@@ -1,0 +1,21 @@
+{
+   node_v8_conservative_stack_condition
+   Memcheck:Cond
+   obj:*/bin/node
+}
+
+{
+   node_v8_and_libuv_runtime_races
+   Helgrind:Race
+   obj:*/bin/node
+}
+
+{
+   node_openssl_builtin_compression_global
+   Memcheck:Leak
+   match-leak-kinds: definite
+   fun:malloc
+   fun:CRYPTO_malloc
+   fun:ossl_load_builtin_compressions
+   fun:context_init
+}

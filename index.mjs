@@ -1,0 +1,40 @@
+import robot from "./index.js";
+
+export const screen = robot.screen;
+export const image_search = robot.image_search;
+export const desktop = robot.desktop;
+export const ScopedWindowError = robot.ScopedWindowError;
+export const ImageCatalogWatcherError = robot.ImageCatalogWatcherError;
+export const DialogError = robot.DialogError;
+export const HotkeyError = robot.HotkeyError;
+export const HeldKeyError = robot.HeldKeyError;
+
+export const registerHotkey = robot.registerHotkey;
+export const randomIntegerBetween = robot.randomIntegerBetween;
+export const sleep = robot.sleep;
+export const sleepRandom = robot.sleepRandom;
+export const showMessageBox = robot.showMessageBox;
+export const showConfirmationDialog = robot.showConfirmationDialog;
+export const setKeyboardDelay = robot.setKeyboardDelay;
+export const keyTap = robot.keyTap;
+export const keyToggle = robot.keyToggle;
+export const unicodeTap = robot.unicodeTap;
+export const typeString = robot.typeString;
+export const typeStringDelayed = robot.typeStringDelayed;
+export const typeStringHumanized = robot.typeStringHumanized;
+export const setMouseDelay = robot.setMouseDelay;
+export const updateScreenMetrics = robot.updateScreenMetrics;
+export const moveMouse = robot.moveMouse;
+export const moveMouseSmooth = robot.moveMouseSmooth;
+export const mouseClick = robot.mouseClick;
+export const doubleClickHumanized = robot.doubleClickHumanized;
+export const mouseToggle = robot.mouseToggle;
+export const dragMouse = robot.dragMouse;
+export const scrollMouse = robot.scrollMouse;
+export const getMousePos = robot.getMousePos;
+export const getPixelColor = robot.getPixelColor;
+export const getScreenSize = robot.getScreenSize;
+export const getDesktopState = robot.getDesktopState;
+export const focusWindow = robot.focusWindow;
+
+export default robot;
